@@ -60,8 +60,11 @@ class VllmHustKvEventCodec:
         batch = self._batch_decoder.decode(payload)
         events = []
         for event in batch.events:
-            group_idx = 0 if event.group_idx is None else event.group_idx
+            if isinstance(event, self._host_cleared):
+                events.append(AllBlocksCleared())
+                continue
             if isinstance(event, self._host_stored):
+                group_idx = 0 if event.group_idx is None else event.group_idx
                 events.append(
                     BlockStored(
                         tuple(
@@ -73,6 +76,7 @@ class VllmHustKvEventCodec:
                     )
                 )
             elif isinstance(event, self._host_removed):
+                group_idx = 0 if event.group_idx is None else event.group_idx
                 events.append(
                     BlockRemoved(
                         tuple(
@@ -82,8 +86,6 @@ class VllmHustKvEventCodec:
                         group_idx=group_idx,
                     )
                 )
-            elif isinstance(event, self._host_cleared):
-                events.append(AllBlocksCleared())
             else:
                 raise TypeError(f"unsupported KV event {type(event).__name__}")
         return CacheEventBatch(
