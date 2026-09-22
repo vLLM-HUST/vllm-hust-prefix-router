@@ -1,0 +1,44 @@
+{
+  "schema_version": "0.2-experimental",
+  "extension_id": "org.vllm-hust.prefix-router",
+  "extension_version": "0.1.0.dev0",
+  "kind": "control_plane_extension",
+  "host": {
+    "provider": "production-stack",
+    "name": "vllm-hust-prefix-router",
+    "version_range": "==0.1.0.dev0"
+  },
+  "runtime": {
+    "type": "external_service",
+    "process_scope": "cluster",
+    "isolation": "process_isolated"
+  },
+  "lifecycle_owner": "user",
+  "protocols": [
+    {
+      "name": "openai.http",
+      "version_range": null
+    },
+    {
+      "name": "vllm.kv-events",
+      "version_range": null
+    }
+  ],
+  "implementation": [
+    {
+      "type": "python_module",
+      "module": "vllm_hust_prefix_router.cli",
+      "object": "main",
+      "status": "import_only"
+    }
+  ],
+  "requires_services": [],
+  "activation": {
+    "entry_points": [],
+    "environment": {},
+    "additional_config": {
+      "command": "vllm-hust-prefix-router serve --config <path>",
+      "lifecycle_note": "The user owns the external service lifecycle."
+    }
+  }
+}

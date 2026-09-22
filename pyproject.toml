@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-hust-prefix-router"
+dynamic = ["version"]
+description = "External prefix-aware request router for vLLM-HUST deployments"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10,<3.15"
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "aiohttp>=3.10,<4",
+    "msgspec>=0.19,<1",
+    "packaging>=24,<27",
+    "pyzmq>=26,<28",
+]
+
+[project.optional-dependencies]
+dev = [
+    "build>=1.2",
+    "pytest>=8,<10",
+    "pytest-asyncio>=0.24,<2",
+    "ruff>=0.11,<1",
+]
+
+[project.scripts]
+vllm-hust-prefix-router = "vllm_hust_prefix_router.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/vLLM-HUST/vllm-hust-prefix-router"
+Repository = "https://github.com/vLLM-HUST/vllm-hust-prefix-router"
+Issues = "https://github.com/vLLM-HUST/vllm-hust-prefix-router/issues"
+
+[project.entry-points."vllm_hust.extension_bundles"]
+"org.vllm-hust.prefix-router" = "vllm_hust_prefix_router.manifests"
+
+[tool.setuptools.dynamic]
+version = {attr = "vllm_hust_prefix_router._version.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+vllm_hust_prefix_router = ["manifests/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "ARG"]
