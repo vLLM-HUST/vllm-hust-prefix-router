@@ -131,6 +131,24 @@ async def test_lifecycle_reservation_is_released_after_stream_completion() -> No
         assert response.status == 200
         await response.read()
         assert tracker.active_request_ids() == ()
+        metrics_response = await client.get("/metrics")
+        metrics = json.loads(await metrics_response.text())
+        assert metrics["routing"] == {
+            "policy": "lifecycle",
+            "lifecycle": {
+                "node-0": {
+                    "active_prefill_tokens": 0,
+                    "active_decode_blocks": 0,
+                    "active_requests": 0,
+                    "tracked_prefill_tokens": 0,
+                    "tracked_decode_blocks": 0,
+                    "tracked_output_blocks": 0,
+                    "tracked_requests": 0,
+                    "pending_requests": 0,
+                    "accepted_requests": 0,
+                }
+            },
+        }
     finally:
         await client.close()
         await upstream.close()

@@ -6,7 +6,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 
 from aiohttp import ClientError, web
@@ -200,8 +200,18 @@ class RouterService:
 
     def metrics(self) -> dict[str, object]:
         """Return transport metrics suitable for health evidence and scraping."""
+        routing: dict[str, object] = {"policy": self.planner.policy}
+        tracker = self.planner.lifecycle_tracker
+        if tracker is not None:
+            routing["lifecycle"] = {
+                node_id: asdict(
+                    tracker.worker_load((node_id, backend.data_parallel_rank))
+                )
+                for node_id, backend in self._backends.items()
+            }
         return {
             "fingerprint_fallbacks": self._fingerprint_fallbacks,
+            "routing": routing,
             "backends": {
                 node_id: vars(stats)
                 for node_id, stats in self.pools.stats().items()
