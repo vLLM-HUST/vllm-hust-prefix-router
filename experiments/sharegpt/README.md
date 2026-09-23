@@ -15,6 +15,11 @@ backend receives an independent pool of 512 connections and an observable
 bounded queue. A result is valid only if the workload and manifest hashes,
 prompt order, input token lengths, output lengths, event-source readiness,
 worker placement, plugin commit, and wheel hash are captured by `evidence.json`.
+The Ascend runtime uses 128-token scheduler and request-hash blocks when
+prefix caching is enabled, so the experiment sets both values explicitly and
+records them. The 16-token counts stored in the workload manifest describe
+how the dataset was constructed; they are not reused as the runtime hash
+granularity.
 
 Run `run_point.py` directly for startup acceptance. Run `run_matrix.py` for
 the resumable formal matrix. The manager skips only successful evidence for

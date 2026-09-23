@@ -1,5 +1,9 @@
 from experiments.sharegpt.run_matrix import point_order
-from experiments.sharegpt.run_point import aggregate_router_metrics, select_phase
+from experiments.sharegpt.run_point import (
+    aggregate_router_metrics,
+    busy_devices,
+    select_phase,
+)
 
 
 def test_point_order_alternates_first_policy_within_each_pair() -> None:
@@ -30,9 +34,7 @@ def test_router_metric_aggregate_keeps_observed_maxima() -> None:
         {
             "metrics": {
                 "routing": {
-                    "lifecycle": {
-                        "node0": {"active_requests": 2, "tracked_prefill": 8}
-                    }
+                    "lifecycle": {"node0": {"active_requests": 2, "tracked_prefill": 8}}
                 },
                 "backends": {
                     "node0": {
@@ -70,3 +72,13 @@ def test_router_metric_aggregate_keeps_observed_maxima() -> None:
         "queued_requests": 1.0,
         "queue_wait_seconds": 0.5,
     }
+
+
+def test_busy_devices_reads_only_npu_process_rows() -> None:
+    output = """
+| 4     910B2               | OK            | 99.1 |
+| 4                         | 0000:81:00.0  | 0    |
+| 4       0                 | 164986        |      |
+| No running processes found in NPU 5              |
+"""
+    assert busy_devices(output) == {"4"}

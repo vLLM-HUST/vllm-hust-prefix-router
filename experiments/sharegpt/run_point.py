@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import signal
 import socket
 import statistics
@@ -82,6 +83,23 @@ def tail(path: Path, lines: int = 120) -> str:
     return "\n".join(
         path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]
     )
+
+
+def busy_devices(npu_smi: str) -> set[str]:
+    """Return physical device IDs that have a reported NPU process."""
+    return {
+        device
+        for device, _chip, _pid in re.findall(
+            r"^\|\s*(\d+)\s+(\d+)\s*\|\s*(\d+)\s*\|",
+            npu_smi,
+            re.MULTILINE,
+        )
+    }
+
+
+def handle_termination(_signum: int, _frame: Any) -> None:
+    """Turn SIGTERM into normal stack unwinding so child groups are reaped."""
+    raise KeyboardInterrupt
 
 
 @dataclass
@@ -302,6 +320,8 @@ def worker_command(
         "4096",
         "--gpu-memory-utilization",
         "0.9",
+        "--block-size",
+        str(args.scheduler_block_size),
         "--enable-prefix-caching",
         "--kv-events-config",
         json.dumps(kv, separators=(",", ":")),
@@ -318,7 +338,7 @@ def router_config(
     return {
         "listen": {"host": "127.0.0.1", "port": router_port},
         "policy": args.policy,
-        "hash_block_size": 16,
+        "hash_block_size": args.hash_block_size,
         "default_backend": "node0",
         "fingerprint": {
             "tokenizer": str(args.model),
@@ -448,6 +468,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ascend-source", type=Path, required=True)
     parser.add_argument("--served-model-name", default="prefix-router-evidence")
     parser.add_argument("--host-version-range", default=">=0.23.1,<0.24")
+    parser.add_argument("--scheduler-block-size", type=int, default=128)
+    parser.add_argument("--hash-block-size", type=int, default=128)
     parser.add_argument("--max-connections", type=int, default=512)
     parser.add_argument("--max-pending-requests", type=int, default=512)
     parser.add_argument("--queue-timeout-s", type=float, default=1.0)
@@ -458,6 +480,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    signal.signal(signal.SIGTERM, handle_termination)
     devices = [value.strip() for value in args.devices.split(",") if value.strip()]
     if len(devices) != 4 or len(set(devices)) != 4:
         raise SystemExit("--devices must contain four distinct device IDs")
@@ -482,7 +505,6 @@ def main() -> None:
     config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
     common_env = os.environ.copy()
     common_env["PYTHONHASHSEED"] = "0"
-    common_env["VLLM_ASCEND_TORCH_PREFLIGHT"] = "0"
     common_env["VLLM_PLUGINS"] = "ascend"
     common_env["PYTHONPATH"] = os.pathsep.join(
         (
@@ -500,9 +522,6 @@ def main() -> None:
     for index, command in enumerate(worker_commands):
         env = common_env.copy()
         env["ASCEND_RT_VISIBLE_DEVICES"] = devices[index]
-        env["VLLM_ROUTING_FEEDBACK"] = "1"
-        env["VLLM_ROUTING_FEEDBACK_NODE_ID"] = f"node{index}"
-        env["VLLM_ROUTING_FEEDBACK_RUN_ID"] = result_dir.name
         workers.append(ChildProcess(command, env, result_dir / f"worker-{index}.log"))
     router_command = [
         str(args.python),
@@ -515,6 +534,11 @@ def main() -> None:
     router = ChildProcess(router_command, common_env, result_dir / "router.log")
     npu_before = run(["npu-smi", "info"], check=False).stdout
     (result_dir / "npu-smi-before.txt").write_text(npu_before, encoding="utf-8")
+    occupied = set(devices) & busy_devices(npu_before)
+    if occupied:
+        raise RuntimeError(
+            f"requested devices are already occupied: {sorted(occupied)}"
+        )
     plugin_commit = run(
         ["git", "rev-parse", "HEAD"], cwd=args.plugin_repo
     ).stdout.strip()
@@ -560,6 +584,10 @@ def main() -> None:
             "max_pending_requests_per_backend": args.max_pending_requests,
             "queue_timeout_s": args.queue_timeout_s,
         },
+        "block_sizes": {
+            "scheduler_tokens": args.scheduler_block_size,
+            "hash_tokens": args.hash_block_size,
+        },
         "commands": {"workers": worker_commands, "router": router_command},
     }
     sampler = MetricsSampler(
@@ -567,8 +595,9 @@ def main() -> None:
     )
     started = time.monotonic()
     try:
-        for index, worker in enumerate(workers):
+        for worker in workers:
             worker.start()
+        for index, worker in enumerate(workers):
             wait_for_health(
                 worker,
                 f"http://127.0.0.1:{http_ports[index]}/health",
