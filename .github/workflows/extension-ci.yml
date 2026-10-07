@@ -1,0 +1,54 @@
+name: Extension CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  package:
+    strategy:
+      matrix:
+        python: ["3.10", "3.12", "3.14"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m ruff check .
+      - run: python -m ruff format --check .
+      - run: python -m pytest -q
+      - run: python -m build
+      - name: Verify clean-wheel ECPA posture
+        if: matrix.python == '3.12'
+        run: |
+          python -m venv .ecpa-smoke
+          .ecpa-smoke/bin/python -m pip install \
+            "vllm-hust-ext @ git+https://github.com/vLLM-HUST/extension-manager.git@7bcfe5566146e148de8f6593dc1b8b2e30dbced9" \
+            dist/vllm_hust_prefix_router-*.whl
+          export XDG_CONFIG_HOME="$PWD/.ecpa-state/config"
+          export XDG_STATE_HOME="$PWD/.ecpa-state/state"
+          export XDG_CACHE_HOME="$PWD/.ecpa-state/cache"
+          cli=.ecpa-smoke/bin/vllm-hust-ext
+          "$cli" extension list \
+            | grep 'org.vllm-hust.prefix-router 0.1.0.dev0 disabled'
+          "$cli" extension inspect org.vllm-hust.prefix-router \
+            | grep 'vllm.request-routing.front-door'
+          "$cli" extension validate org.vllm-hust.prefix-router >/dev/null
+          "$cli" extension check org.vllm-hust.prefix-router \
+            | grep 'descriptor-only'
+          "$cli" extension plan org.vllm-hust.prefix-router \
+            | grep '"operation": "inspect_only"'
+          "$cli" extension render org.vllm-hust.prefix-router \
+            | grep '\\"operation\\": \\"inspect_only\\"'
+          if "$cli" extension enable org.vllm-hust.prefix-router; then
+            echo 'import_only external service was unexpectedly enabled' >&2
+            exit 1
+          fi
+          "$cli" run --dry-run -- python -c pass >.ecpa-run.json
+          if grep -q 'PREFIX_ROUTER' .ecpa-run.json; then
+            echo 'disabled service unexpectedly changed the native path' >&2
+            exit 1
+          fi

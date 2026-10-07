@@ -1,0 +1,68 @@
+{
+  "listen": {
+    "host": "0.0.0.0",
+    "port": 8000
+  },
+  "policy": "lifecycle",
+  "hash_block_size": 16,
+  "default_backend": "node0",
+  "fingerprint": {
+    "tokenizer": "REPLACE_WITH_WORKER_MODEL_OR_TOKENIZER",
+    "hash_algorithm": "xxhash",
+    "host_version_range": ">=0.23.1,<0.24",
+    "trust_remote_code": false
+  },
+  "lifecycle": {
+    "prefill_load_weight": 1.0,
+    "active_request_weight": 0.0,
+    "selection_temperature": 0.0,
+    "track_output_blocks": false,
+    "request_expiry_s": 300.0
+  },
+  "backends": [
+    {
+      "id": "node0",
+      "url": "http://10.0.0.10:8000",
+      "event_endpoint": "tcp://10.0.0.10:5557",
+      "replay_endpoint": "tcp://10.0.0.10:5558",
+      "pool": {
+        "max_connections": 512,
+        "max_pending_requests": 512,
+        "queue_timeout_s": 1.0
+      }
+    },
+    {
+      "id": "node1",
+      "url": "http://10.0.0.11:8000",
+      "event_endpoint": "tcp://10.0.0.11:5557",
+      "replay_endpoint": "tcp://10.0.0.11:5558",
+      "pool": {
+        "max_connections": 512,
+        "max_pending_requests": 512,
+        "queue_timeout_s": 1.0
+      }
+    },
+    {
+      "id": "node2",
+      "url": "http://10.0.0.12:8000",
+      "event_endpoint": "tcp://10.0.0.12:5557",
+      "replay_endpoint": "tcp://10.0.0.12:5558",
+      "pool": {
+        "max_connections": 512,
+        "max_pending_requests": 512,
+        "queue_timeout_s": 1.0
+      }
+    },
+    {
+      "id": "node3",
+      "url": "http://10.0.0.13:8000",
+      "event_endpoint": "tcp://10.0.0.13:5557",
+      "replay_endpoint": "tcp://10.0.0.13:5558",
+      "pool": {
+        "max_connections": 512,
+        "max_pending_requests": 512,
+        "queue_timeout_s": 1.0
+      }
+    }
+  ]
+}
