@@ -26,7 +26,7 @@ jobs:
         run: |
           python -m venv .ecpa-smoke
           .ecpa-smoke/bin/python -m pip install \
-            "vllm-hust-ext @ git+https://github.com/vLLM-HUST/extension-manager.git@0061862102324a8ad2db59e154bc0f811bf4d4e2" \
+            "vllm-hust-ext @ git+https://github.com/vLLM-HUST/extension-manager.git@7bcfe5566146e148de8f6593dc1b8b2e30dbced9" \
             dist/vllm_hust_prefix_router-*.whl
           export XDG_CONFIG_HOME="$PWD/.ecpa-state/config"
           export XDG_STATE_HOME="$PWD/.ecpa-state/state"
