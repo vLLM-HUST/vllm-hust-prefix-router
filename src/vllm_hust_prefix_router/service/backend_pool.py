@@ -119,7 +119,7 @@ class BackendConnectionPool:
                 await asyncio.wait_for(
                     self._slots.acquire(), timeout=pool.queue_timeout_s
                 )
-            except TimeoutError as exc:
+            except asyncio.TimeoutError as exc:
                 self._rejected_requests += 1
                 raise BackendPoolSaturated(
                     f"backend {self.config.node_id!r} admission timed out"
