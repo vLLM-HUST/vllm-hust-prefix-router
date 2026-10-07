@@ -97,9 +97,7 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
             lifecycle_values.keys() - LifecycleRoutingConfig.__dataclass_fields__.keys()
         )
         if unknown_lifecycle:
-            raise ValueError(
-                f"unsupported lifecycle keys: {sorted(unknown_lifecycle)}"
-            )
+            raise ValueError(f"unsupported lifecycle keys: {sorted(unknown_lifecycle)}")
         lifecycle_tracker = LifecycleLoadTracker(
             block_size=block_size,
             config=LifecycleRoutingConfig(**lifecycle_values),
@@ -150,9 +148,7 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
         RouterServiceConfig(
             backends=backends,
             default_backend=default_backend,
-            max_request_body_size=raw.get(
-                "max_request_body_size", 16 * 1024 * 1024
-            ),
+            max_request_body_size=raw.get("max_request_body_size", 16 * 1024 * 1024),
         ),
         planner=planner,
         fingerprinter=fingerprinter,

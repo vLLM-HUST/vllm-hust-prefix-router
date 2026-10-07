@@ -1,5 +1,5 @@
 {
-  "schema_version": "0.2-experimental",
+  "schema_version": "0.3-experimental",
   "extension_id": "org.vllm-hust.prefix-router",
   "extension_version": "0.1.0.dev0",
   "kind": "control_plane_extension",
@@ -32,7 +32,30 @@
       "status": "import_only"
     }
   ],
-  "requires_services": [],
+  "requires_services": [
+    {
+      "service_id": "vllm-openai-backends",
+      "protocol": "openai.http",
+      "version_range": null,
+      "endpoint_config": "backend_endpoints",
+      "optional": false
+    },
+    {
+      "service_id": "vllm-kv-event-streams",
+      "protocol": "vllm.kv-events",
+      "version_range": null,
+      "endpoint_config": "kv_event_endpoints",
+      "optional": false
+    }
+  ],
+  "requires_extensions": [],
+  "resource_claims": [
+    {
+      "resource": "vllm.request-routing.front-door",
+      "scope": "deployment",
+      "mode": "exclusive"
+    }
+  ],
   "activation": {
     "entry_points": [],
     "environment": {},

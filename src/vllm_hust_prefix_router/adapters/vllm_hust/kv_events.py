@@ -46,6 +46,7 @@ class VllmHustKvEventCodec:
             ZmqEventReplayRequest,
             ZmqEventReplayResponse,
         )
+
         self._msgspec = msgspec
         self._host_stored = HostBlockStored
         self._host_removed = HostBlockRemoved

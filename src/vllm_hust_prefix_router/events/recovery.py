@@ -116,9 +116,9 @@ class CacheEventRecovery:
 
     def _apply_payload(self, payload: bytes) -> None:
         batch = self.codec.decode_batch(payload)
-        if (
-            self.data_parallel_rank is not None
-            and batch.data_parallel_rank not in (None, self.data_parallel_rank)
+        if self.data_parallel_rank is not None and batch.data_parallel_rank not in (
+            None,
+            self.data_parallel_rank,
         ):
             raise ValueError("KV event rank does not match the configured backend")
         self.index.apply_event_batch(self.node_id, batch)

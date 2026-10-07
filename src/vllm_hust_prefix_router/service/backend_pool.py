@@ -155,12 +155,15 @@ class BackendConnectionPool:
         """Dispatch one request while holding an admission slot through streaming."""
         merged_headers = dict(headers or {})
         merged_headers.update(self.config.headers)
-        async with self._admit(), self.session.request(
-            method,
-            self._target_url(path),
-            headers=merged_headers,
-            **kwargs,
-        ) as response:
+        async with (
+            self._admit(),
+            self.session.request(
+                method,
+                self._target_url(path),
+                headers=merged_headers,
+                **kwargs,
+            ) as response,
+        ):
             yield response
 
 

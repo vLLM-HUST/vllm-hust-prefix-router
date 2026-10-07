@@ -106,9 +106,7 @@ class VllmHustTextFingerprinter:
                     extra_keys=None,
                 )
                 hashes.append(
-                    normalize_external_block_hash(
-                        maybe_convert_block_hash(parent_hash)
-                    )
+                    normalize_external_block_hash(maybe_convert_block_hash(parent_hash))
                 )
             return tuple(hashes)
 
@@ -171,18 +169,14 @@ class VllmHustTextFingerprinter:
         ):
             batches = tuple(
                 tuple(
-                    self._tokenizer.encode(
-                        value, add_special_tokens=add_special_tokens
-                    )
+                    self._tokenizer.encode(value, add_special_tokens=add_special_tokens)
                 )
                 for value in prompt
             )
         elif isinstance(prompt, list) and all(
             isinstance(value, list)
             and all(
-                isinstance(token, int)
-                and not isinstance(token, bool)
-                and token >= 0
+                isinstance(token, int) and not isinstance(token, bool) and token >= 0
                 for token in value
             )
             for value in prompt

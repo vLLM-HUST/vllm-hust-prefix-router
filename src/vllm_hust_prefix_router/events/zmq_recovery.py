@@ -84,9 +84,7 @@ class ZmqEventSubscriber:
             await asyncio.gather(self._task, return_exceptions=True)
             self._task = None
         self.ready = False
-        self.index.invalidate_node(
-            self.config.node_id, self.config.data_parallel_rank
-        )
+        self.index.invalidate_node(self.config.node_id, self.config.data_parallel_rank)
 
     def status(self) -> dict[str, object]:
         """Return health and sequence state for readiness evidence."""

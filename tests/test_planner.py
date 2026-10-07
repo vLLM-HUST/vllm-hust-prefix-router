@@ -16,9 +16,7 @@ def test_prefix_policy_preserves_longest_prefix_selection() -> None:
     index.apply_events("node-1", [])
     planner = RoutePlanner(index, policy="prefix", block_size=16)
 
-    decision = planner.choose(
-        "request-1", (PromptFingerprint(32, (b"a", b"b")),)
-    )
+    decision = planner.choose("request-1", (PromptFingerprint(32, (b"a", b"b")),))
 
     assert decision is not None
     assert decision.node_id == "node-0"

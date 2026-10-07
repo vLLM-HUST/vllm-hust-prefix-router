@@ -45,8 +45,7 @@ async def _upstream() -> tuple[TestServer, list[dict]]:
         )
         await response.prepare(request)
         await response.write(
-            b'data: {"choices":[{"index":0,"text":"ok",'
-            b'"finish_reason":"stop"}]}\n\n'
+            b'data: {"choices":[{"index":0,"text":"ok","finish_reason":"stop"}]}\n\n'
         )
         await response.write(b"data: [DONE]\n\n")
         await response.write_eof()
@@ -216,6 +215,4 @@ def test_downstream_headers_preserve_content_encoding() -> None:
         "Content-Length": "123",
         "Connection": "close",
     }
-    assert RouterService._downstream_headers(headers) == {
-        "Content-Encoding": "gzip"
-    }
+    assert RouterService._downstream_headers(headers) == {"Content-Encoding": "gzip"}

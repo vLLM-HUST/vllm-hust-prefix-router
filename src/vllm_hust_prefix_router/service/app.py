@@ -137,9 +137,7 @@ class RouterService:
         else:
             decision = self.planner.choose(request_id, prompts)
         node_id = (
-            decision.node_id
-            if decision is not None
-            else self.config.default_backend
+            decision.node_id if decision is not None else self.config.default_backend
         )
         backend = self._backends[node_id]
 
@@ -213,8 +211,7 @@ class RouterService:
             "fingerprint_fallbacks": self._fingerprint_fallbacks,
             "routing": routing,
             "backends": {
-                node_id: vars(stats)
-                for node_id, stats in self.pools.stats().items()
+                node_id: vars(stats) for node_id, stats in self.pools.stats().items()
             },
             "event_sources": [source.status() for source in self.event_sources],
         }
@@ -246,8 +243,7 @@ class RouterService:
         result = {
             key: value
             for key, value in headers.items()
-            if key.lower()
-            not in _HOP_BY_HOP_HEADERS | {"host", "content-length"}
+            if key.lower() not in _HOP_BY_HOP_HEADERS | {"host", "content-length"}
         }
         if backend.data_parallel_rank is not None:
             result["x-data-parallel-rank"] = str(backend.data_parallel_rank)
@@ -258,8 +254,7 @@ class RouterService:
         return {
             key: value
             for key, value in headers.items()
-            if key.lower()
-            not in _HOP_BY_HOP_HEADERS | {"content-length"}
+            if key.lower() not in _HOP_BY_HOP_HEADERS | {"content-length"}
         }
 
 

@@ -7,6 +7,11 @@ vLLM-HUST.
 installable and discoverable, but its manifest remains `import_only` until the
 external service passes end-to-end acceptance.**
 
+The Manifest 0.3 descriptor names the required OpenAI backend and KV-event
+service sets and claims the deployment routing front door exclusively. These
+are composition metadata only: ECPA does not start, stop, configure, or health-
+check this user-owned process while the carrier is `import_only`.
+
 The target is a control-plane router extension plus a narrow vLLM cache-event
 adapter. The global router will not be presented as an in-process scheduler
 plugin.
@@ -77,4 +82,11 @@ uv build --no-sources --out-dir dist
 
 No package version has been published. Do not treat installation or Extension
 Manager discovery as service activation.
+
+Current ECPA validation is intentionally limited to `list`, `inspect`,
+`validate`, `check`, `plan`, and `render`. `enable` must fail closed; the
+operator starts and stops the service explicitly with the command above. A
+future active provider must bind the manifest's `backend_endpoints` and
+`kv_event_endpoints` configuration keys to real health evidence before launch
+intent can be accepted.
 

@@ -257,9 +257,7 @@ class GlobalPrefixIndex:
         if not matched:
             self._state_for_events(node_id, data_parallel_rank).invalidate()
 
-    def trust_node(
-        self, node_id: str, data_parallel_rank: int | None = None
-    ) -> None:
+    def trust_node(self, node_id: str, data_parallel_rank: int | None = None) -> None:
         """Mark a recovered node state usable for prefix matching."""
         state = self._state_for_events(node_id, data_parallel_rank)
         state.trusted = True
@@ -351,9 +349,7 @@ class GlobalPrefixIndex:
             return None
         best_match = max(decision.matched_tokens for decision in candidates)
         tied = [
-            decision
-            for decision in candidates
-            if decision.matched_tokens == best_match
+            decision for decision in candidates if decision.matched_tokens == best_match
         ]
         if node_loads is not None and all(
             decision.node_id in node_loads for decision in tied

@@ -25,9 +25,7 @@ def _fingerprinter() -> VllmHustTextFingerprinter:
     return VllmHustTextFingerprinter(
         VllmHustFingerprintConfig("fake", hash_block_size=2),
         _tokenizer=FakeTokenizer(),
-        _hash_tokens=lambda tokens: (
-            len(tokens).to_bytes(2, "big"),
-        ),
+        _hash_tokens=lambda tokens: (len(tokens).to_bytes(2, "big"),),
     )
 
 

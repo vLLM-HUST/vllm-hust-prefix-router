@@ -23,9 +23,7 @@ def test_longest_prefix_match_uses_normalized_events() -> None:
 def test_event_gap_invalidation_forces_zero_prefix_score() -> None:
     index = GlobalPrefixIndex()
     index.register_node("node-0", hash_block_size=16, group_block_sizes={0: 16})
-    index.apply_events(
-        "node-0", [BlockStored((b"first", b"second"), block_size=16)]
-    )
+    index.apply_events("node-0", [BlockStored((b"first", b"second"), block_size=16)])
     assert index.score_nodes((b"first", b"second"), 33)[0].matched_tokens == 32
 
     index.invalidate_node("node-0")
