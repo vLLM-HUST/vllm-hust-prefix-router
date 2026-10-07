@@ -18,7 +18,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -489,7 +489,7 @@ def main() -> None:
     workload = args.manifest.parent / phase["path"]
     if sha256(workload) != phase["sha256"]:
         raise RuntimeError("workload SHA-256 does not match the frozen manifest")
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     result_dir = args.result_root / (
         f"{args.policy}-rep-{args.rep}-rate-{phase['request_rate']:g}-{timestamp}"
     )
@@ -548,7 +548,7 @@ def main() -> None:
     evidence: dict[str, Any] = {
         "schema_version": "external-router-sharegpt-point/v1",
         "success": False,
-        "started_at": datetime.now(UTC).isoformat(),
+        "started_at": datetime.now(timezone.utc).isoformat(),
         "policy": args.policy,
         "curve_repetition": args.rep,
         "rate_index": args.rate_index,
@@ -673,7 +673,7 @@ def main() -> None:
         (result_dir / "npu-smi-after.txt").write_text(
             run(["npu-smi", "info"], check=False).stdout, encoding="utf-8"
         )
-        evidence["finished_at"] = datetime.now(UTC).isoformat()
+        evidence["finished_at"] = datetime.now(timezone.utc).isoformat()
         evidence["duration_seconds"] = time.monotonic() - started
         evidence_path.write_text(
             json.dumps(evidence, indent=2, sort_keys=True), encoding="utf-8"
