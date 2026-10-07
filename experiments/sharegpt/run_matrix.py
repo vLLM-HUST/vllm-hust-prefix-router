@@ -8,7 +8,7 @@ import json
 import re
 import subprocess
 import time
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +16,7 @@ RATES = (2.0, 8.0, 16.0, 24.0, 32.0, 40.0, 48.0)
 
 
 def now() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def run(command: list[str]) -> subprocess.CompletedProcess[str]:
