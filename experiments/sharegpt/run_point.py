@@ -200,19 +200,36 @@ def measurement_window(
 ) -> dict[str, Any]:
     end_s = start_s + duration_s
     timings = result.get("routing_client_timings", [])
-    vectors = [
-        timings,
-        result.get("latencies", []),
-        result.get("ttfts", []),
-        result.get("output_lens", []),
-        result.get("errors", []),
-    ]
-    if len({len(value) for value in vectors}) != 1 or not timings:
+    latencies = result.get("latencies", [])
+    ttfts = result.get("ttfts", [])
+    output_lens = result.get("output_lens", [])
+    errors = result.get("errors", [])
+    starts = result.get("start_times", [])
+    queues = result.get("queue_times", [])
+    vectors = [latencies, ttfts, output_lens, errors]
+    if timings:
+        vectors.append(timings)
+    else:
+        vectors.extend((starts, queues))
+    if not latencies or len({len(value) for value in vectors}) != 1:
         raise RuntimeError("detailed client timing vectors are missing or incomplete")
+    first_arrival = (
+        0.0
+        if timings
+        else min(start - queue for start, queue in zip(starts, queues, strict=True))
+    )
     records = []
-    for timing, latency, ttft, output_len, error in zip(*vectors, strict=True):
-        arrival = float(timing["arrival_offset_s"])
-        dispatch = float(timing["dispatch_offset_s"])
+    for index, (latency, ttft, output_len, error) in enumerate(
+        zip(latencies, ttfts, output_lens, errors, strict=True)
+    ):
+        if timings:
+            arrival = float(timings[index]["arrival_offset_s"])
+            dispatch = float(timings[index]["dispatch_offset_s"])
+            wait_ms = float(timings[index]["concurrency_wait_ms"])
+        else:
+            dispatch = float(starts[index]) - first_arrival
+            wait_ms = float(queues[index]) * 1000
+            arrival = dispatch - wait_ms / 1000
         records.append(
             {
                 "arrival": arrival,
@@ -222,7 +239,7 @@ def measurement_window(
                 "ttft": float(ttft),
                 "output_len": int(output_len),
                 "success": not bool(error),
-                "wait_ms": float(timing["concurrency_wait_ms"]),
+                "wait_ms": wait_ms,
             }
         )
     cohort = [item for item in records if start_s <= item["arrival"] < end_s]
@@ -317,11 +334,15 @@ def worker_command(
         "--port",
         str(http_port),
         "--max-model-len",
-        "4096",
+        str(args.max_model_len),
         "--gpu-memory-utilization",
         "0.9",
         "--block-size",
         str(args.scheduler_block_size),
+        "--prefix-match-unit",
+        str(args.hash_block_size),
+        "--tensor-parallel-size",
+        str(args.tensor_parallel_size),
         "--enable-prefix-caching",
         "--kv-events-config",
         json.dumps(kv, separators=(",", ":")),
@@ -338,6 +359,7 @@ def router_config(
     return {
         "listen": {"host": "127.0.0.1", "port": router_port},
         "policy": args.policy,
+        "allow_unversioned_replay": args.allow_unversioned_replay,
         "hash_block_size": args.hash_block_size,
         "default_backend": "node0",
         "fingerprint": {
@@ -349,6 +371,7 @@ def router_config(
         "lifecycle": {
             "prefill_load_weight": 1.0,
             "active_request_weight": 0.0,
+            "decode_block_weight": 1.0,
             "selection_temperature": 0.0,
             "track_output_blocks": False,
             "request_expiry_s": 300.0,
@@ -358,6 +381,7 @@ def router_config(
                 "id": f"node{index}",
                 "url": f"http://127.0.0.1:{http_ports[index]}",
                 "data_parallel_rank": 0,
+                "group_block_sizes": args.group_block_sizes,
                 "event_endpoint": f"tcp://127.0.0.1:{event_ports[index]}",
                 "replay_endpoint": f"tcp://127.0.0.1:{replay_ports[index]}",
                 "pool": {
@@ -399,13 +423,13 @@ def benchmark_command(
         "--num-prompts",
         str(phase["total_requests"]),
         "--custom-output-len",
-        "64",
+        str(args.output_tokens),
         "--request-rate",
         str(phase["request_rate"]),
         "--burstiness",
         "1.0",
         "--max-concurrency",
-        "256",
+        str(args.max_concurrency),
         "--seed",
         str(phase["arrival_seed"]),
         "--disable-shuffle",
@@ -467,7 +491,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vllm-source", type=Path, required=True)
     parser.add_argument("--ascend-source", type=Path, required=True)
     parser.add_argument("--served-model-name", default="prefix-router-evidence")
-    parser.add_argument("--host-version-range", default=">=0.23.1,<0.24")
+    parser.add_argument("--host-version-range", default=">=0.29.1,<0.30")
+    parser.add_argument("--tensor-parallel-size", type=int, default=1)
+    parser.add_argument("--max-model-len", type=int, default=4096)
+    parser.add_argument("--output-tokens", type=int, default=64)
+    parser.add_argument("--max-concurrency", type=int, default=256)
+    parser.add_argument("--allow-unversioned-replay", action="store_true")
+    parser.add_argument("--group-block-sizes", default='{"0":128}')
     parser.add_argument("--scheduler-block-size", type=int, default=128)
     parser.add_argument("--hash-block-size", type=int, default=128)
     parser.add_argument("--max-connections", type=int, default=512)
@@ -481,9 +511,14 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     signal.signal(signal.SIGTERM, handle_termination)
+    args.group_block_sizes = json.loads(args.group_block_sizes)
+    if not isinstance(args.group_block_sizes, dict) or not args.group_block_sizes:
+        raise SystemExit("--group-block-sizes must be a non-empty JSON object")
     devices = [value.strip() for value in args.devices.split(",") if value.strip()]
-    if len(devices) != 4 or len(set(devices)) != 4:
-        raise SystemExit("--devices must contain four distinct device IDs")
+    if len(devices) != 4 * args.tensor_parallel_size or len(set(devices)) != len(
+        devices
+    ):
+        raise SystemExit("--devices must contain four disjoint TP device groups")
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     phase = select_phase(manifest, args.rep, args.rate_index)
     workload = args.manifest.parent / phase["path"]
@@ -521,7 +556,10 @@ def main() -> None:
     workers = []
     for index, command in enumerate(worker_commands):
         env = common_env.copy()
-        env["ASCEND_RT_VISIBLE_DEVICES"] = devices[index]
+        start = index * args.tensor_parallel_size
+        visible = ",".join(devices[start : start + args.tensor_parallel_size])
+        env["ASCEND_RT_VISIBLE_DEVICES"] = visible
+        env["ASCEND_VISIBLE_DEVICES"] = visible
         workers.append(ChildProcess(command, env, result_dir / f"worker-{index}.log"))
     router_command = [
         str(args.python),
@@ -557,6 +595,7 @@ def main() -> None:
             "physical_host_count": 1,
             "logical_worker_count": 4,
             "devices": devices,
+            "tensor_parallel_size": args.tensor_parallel_size,
             "all_backends_use_http": True,
         },
         "software": {
@@ -577,7 +616,7 @@ def main() -> None:
             "measurement_seconds": phase["measurement_seconds"],
             "prompt_token_min": phase["prompt_token_min"],
             "prompt_token_max": phase["prompt_token_max"],
-            "output_tokens": 64,
+            "output_tokens": args.output_tokens,
         },
         "transport": {
             "max_connections_per_backend": args.max_connections,
@@ -585,8 +624,9 @@ def main() -> None:
             "queue_timeout_s": args.queue_timeout_s,
         },
         "block_sizes": {
-            "scheduler_tokens": args.scheduler_block_size,
-            "hash_tokens": args.hash_block_size,
+            "requested_attention_tokens": args.scheduler_block_size,
+            "prefix_match_tokens": args.hash_block_size,
+            "physical_groups": args.group_block_sizes,
         },
         "commands": {"workers": worker_commands, "router": router_command},
     }
@@ -628,14 +668,17 @@ def main() -> None:
         attempted = int(result.get("completed", 0)) + int(result.get("failed", 0))
         if attempted != int(phase["total_requests"]):
             raise RuntimeError(f"benchmark attempted {attempted} requests")
-        if result.get("prompt_sha256") != phase["ordered_prompt_sha256"]:
+        if (
+            result.get("prompt_sha256") is not None
+            and result["prompt_sha256"] != phase["ordered_prompt_sha256"]
+        ):
             raise RuntimeError("benchmark prompt order differs from manifest")
         if result.get("input_lens") != phase["ordered_prompt_tokens"]:
             raise RuntimeError("benchmark token lengths differ from manifest")
         if result.get("failed") == 0 and any(
-            value != 64 for value in result.get("output_lens", [])
+            value != args.output_tokens for value in result.get("output_lens", [])
         ):
-            raise RuntimeError("successful responses did not all contain 64 tokens")
+            raise RuntimeError("successful responses did not all reach output length")
         time.sleep(2)
         sampler.stop()
         metrics_after = get_json(f"http://127.0.0.1:{router_port}/metrics")

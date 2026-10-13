@@ -100,6 +100,17 @@ class NodePrefixCacheState:
         """Apply normalized cache deltas."""
         for event in events:
             if isinstance(event, BlockStored):
+                if (
+                    self.group_block_sizes
+                    and event.group_idx not in self.group_block_sizes
+                ):
+                    raise ValueError(f"unexpected KV cache group {event.group_idx}")
+                configured_size = self.group_block_sizes.get(event.group_idx)
+                if configured_size is not None and configured_size != event.block_size:
+                    raise ValueError(
+                        f"KV cache group {event.group_idx} block size changed "
+                        f"from {configured_size} to {event.block_size}"
+                    )
                 self.group_block_sizes[event.group_idx] = event.block_size
                 self.group_hashes[event.group_idx].update(event.block_hashes)
             elif isinstance(event, BlockRemoved):
@@ -109,9 +120,10 @@ class NodePrefixCacheState:
             elif isinstance(event, AllBlocksCleared):
                 self.group_hashes.clear()
 
-    def invalidate(self) -> None:
-        """Stop using cached-prefix claims until a full recovery completes."""
-        self.group_hashes.clear()
+    def invalidate(self, *, clear: bool = False) -> None:
+        """Suspend prefix claims, optionally discarding the previous generation."""
+        if clear:
+            self.group_hashes.clear()
         self.trusted = False
 
     def longest_prefix_match(
@@ -243,8 +255,24 @@ class GlobalPrefixIndex:
         """Apply a normalized event batch."""
         self.apply_events(node_id, batch.events, batch.data_parallel_rank)
 
+    def replace_from_event_snapshot(self, node_id: str, batch: CacheEventBatch) -> None:
+        """Replace one rank's cache and group layout from a full event image."""
+        previous = self._state_for_events(node_id, batch.data_parallel_rank)
+        replacement = NodePrefixCacheState(
+            node_id=node_id,
+            hash_block_size=previous.hash_block_size,
+            data_parallel_rank=previous.data_parallel_rank,
+        )
+        replacement.apply_events(batch.events)
+        replacement.trusted = False
+        self._nodes[node_id, previous.data_parallel_rank] = replacement
+
     def invalidate_node(
-        self, node_id: str, data_parallel_rank: int | None = None
+        self,
+        node_id: str,
+        data_parallel_rank: int | None = None,
+        *,
+        clear: bool = False,
     ) -> None:
         """Invalidate prefix claims after an event gap or publisher restart."""
         matched = False
@@ -252,10 +280,10 @@ class GlobalPrefixIndex:
             if candidate_id == node_id and (
                 data_parallel_rank is None or rank == data_parallel_rank
             ):
-                state.invalidate()
+                state.invalidate(clear=clear)
                 matched = True
         if not matched:
-            self._state_for_events(node_id, data_parallel_rank).invalidate()
+            self._state_for_events(node_id, data_parallel_rank).invalidate(clear=clear)
 
     def trust_node(self, node_id: str, data_parallel_rank: int | None = None) -> None:
         """Mark a recovered node state usable for prefix matching."""

@@ -140,7 +140,10 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--result-root", type=Path, required=True)
+    parser.add_argument("--expected-pairs", type=int, default=21)
     args = parser.parse_args()
+    if args.expected_pairs <= 0:
+        parser.error("--expected-pairs must be positive")
     selected = load_latest(args.result_root)
     raw = [raw_row(value) for _key, value in sorted(selected.items())]
     paired = paired_rows(selected)
@@ -149,7 +152,11 @@ def main() -> None:
         "schema_version": "external-router-sharegpt-summary/v1",
         "successful_point_count": len(raw),
         "paired_point_count": len(paired),
-        "complete": len(raw) == 42 and len(paired) == 21,
+        "expected_point_count": args.expected_pairs * 2,
+        "expected_pair_count": args.expected_pairs,
+        "complete": (
+            len(raw) == args.expected_pairs * 2 and len(paired) == args.expected_pairs
+        ),
         "raw": raw,
         "paired": paired,
         "by_rate": aggregate,

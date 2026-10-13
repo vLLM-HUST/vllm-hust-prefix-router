@@ -41,29 +41,49 @@ class CacheEventRecovery:
         index: GlobalPrefixIndex,
         codec: CacheEventCodec,
         replay: Replay,
+        snapshot_replay: bool = True,
     ) -> None:
         self.node_id = node_id
         self.data_parallel_rank = data_parallel_rank
         self.index = index
         self.codec = codec
         self.replay = replay
+        self.snapshot_replay = snapshot_replay
         self.state = RecoveryState()
+        self._last_live_seq: int | None = None
 
     async def initialize(self) -> None:
         """Require a full snapshot before trusting live cache claims."""
-        self.index.invalidate_node(self.node_id, self.data_parallel_rank)
-        response = await self.replay(self.state, True)
-        self.apply_replay(response, require_snapshot=True)
+        self.index.invalidate_node(self.node_id, self.data_parallel_rank, clear=True)
+        response = await self.replay(self.state, self.snapshot_replay)
+        self.apply_replay(response, require_snapshot=self.snapshot_replay)
 
     async def apply_live(self, sequence: int, payload: bytes) -> None:
         """Apply one live batch, recovering any missing interval first."""
         if sequence < 0:
             raise ValueError("event sequence must be non-negative")
+        if (
+            not self.snapshot_replay
+            and self._last_live_seq is not None
+            and sequence < self._last_live_seq
+        ):
+            # An unversioned publisher may have restarted at sequence zero.
+            self.state = RecoveryState()
+            self._last_live_seq = None
+            await self.initialize()
+        if self.state.next_seq is not None and sequence < self.state.next_seq:
+            return
         needed_snapshot = self.state.next_seq is None
         if needed_snapshot or sequence != self.state.next_seq:
             self.index.invalidate_node(self.node_id, self.data_parallel_rank)
-            response = await self.replay(self.state, needed_snapshot)
-            self.apply_replay(response, require_snapshot=needed_snapshot)
+            response = await self.replay(
+                self.state, needed_snapshot and self.snapshot_replay
+            )
+            self.apply_replay(
+                response, require_snapshot=needed_snapshot and self.snapshot_replay
+            )
+        if sequence < (self.state.next_seq or 0):
+            return
         if sequence != self.state.next_seq:
             raise ValueError(
                 f"live event gap remains after replay: expected "
@@ -71,6 +91,7 @@ class CacheEventRecovery:
             )
         self._apply_payload(payload)
         self.state.next_seq = sequence + 1
+        self._last_live_seq = sequence
 
     def apply_replay(
         self, response: CacheReplayResponse, *, require_snapshot: bool = False
@@ -85,13 +106,28 @@ class CacheEventRecovery:
 
         if response.snapshot is not None:
             snapshot_batch = self.codec.decode_batch(response.snapshot)
-            self.index.invalidate_node(self.node_id, self.data_parallel_rank)
-            self.index.apply_event_batch(self.node_id, snapshot_batch)
+            trusted_rank = snapshot_batch.data_parallel_rank
+            self.index.invalidate_node(
+                self.node_id, self.data_parallel_rank, clear=True
+            )
+            self.index.replace_from_event_snapshot(self.node_id, snapshot_batch)
             if response.replayed_batches:
                 raise ValueError("snapshot replay response must not mix delta batches")
             expected = response.next_seq
         else:
+            trusted_rank = self.data_parallel_rank
             expected = self.state.next_seq
+            if not self.snapshot_replay and response.replayed_batches:
+                first = response.replayed_batches[0][0]
+                if expected is None or first > expected:
+                    # A truncated replay cannot reconstruct old cache entries.
+                    # Rebuild a conservative lower-bound view from retained deltas.
+                    self.index.invalidate_node(
+                        self.node_id, self.data_parallel_rank, clear=True
+                    )
+                    expected = first
+            if not self.snapshot_replay and expected is None:
+                expected = response.next_seq
             if expected is None:
                 raise ValueError("replay without a snapshot has no starting sequence")
 
@@ -112,7 +148,7 @@ class CacheEventRecovery:
             self.index.apply_event_batch(self.node_id, batch)
         self.state.publisher_epoch = response.publisher_epoch
         self.state.next_seq = response.next_seq
-        self.index.trust_node(self.node_id, self.data_parallel_rank)
+        self.index.trust_node(self.node_id, trusted_rank)
 
     def _apply_payload(self, payload: bytes) -> None:
         batch = self.codec.decode_batch(payload)

@@ -2,6 +2,7 @@ from experiments.sharegpt.run_matrix import point_order
 from experiments.sharegpt.run_point import (
     aggregate_router_metrics,
     busy_devices,
+    measurement_window,
     select_phase,
 )
 
@@ -82,3 +83,20 @@ def test_busy_devices_reads_only_npu_process_rows() -> None:
 | No running processes found in NPU 5              |
 """
     assert busy_devices(output) == {"4"}
+
+
+def test_measurement_window_accepts_current_benchmark_timings() -> None:
+    result = {
+        "start_times": [101.0, 103.0, 104.0],
+        "queue_times": [0.0, 1.0, 0.5],
+        "latencies": [2.0, 3.0, 1.0],
+        "ttfts": [0.5, 1.0, 0.25],
+        "output_lens": [4, 4, 4],
+        "errors": ["", "", ""],
+    }
+    window = measurement_window(result, start_s=1.0, duration_s=2.0)
+    assert window["arrival_count"] == 2
+    assert window["terminal_count"] == 1
+    assert window["backlog_at_start"] == 1
+    assert window["backlog_at_end"] == 2
+    assert window["p95_concurrency_wait_ms"] == 975.0

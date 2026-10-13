@@ -1,3 +1,5 @@
+import pytest
+
 from vllm_hust_prefix_router.core.prefix_index import GlobalPrefixIndex
 from vllm_hust_prefix_router.protocols.cache_events import (
     AllBlocksCleared,
@@ -18,6 +20,37 @@ def test_longest_prefix_match_uses_normalized_events() -> None:
     assert decision is not None
     assert decision.node_id == "node-1"
     assert decision.matched_tokens == 32
+
+
+def test_hybrid_prefix_requires_every_configured_cache_group() -> None:
+    index = GlobalPrefixIndex()
+    index.register_node(
+        "tp2-instance",
+        hash_block_size=16,
+        data_parallel_rank=0,
+        group_block_sizes={0: 16, 1: 32},
+    )
+    index.apply_events(
+        "tp2-instance",
+        [BlockStored((b"a", b"b"), block_size=16, group_idx=0)],
+        data_parallel_rank=0,
+    )
+    assert index.score_nodes((b"a", b"b"), 33)[0].matched_tokens == 0
+    index.apply_events(
+        "tp2-instance",
+        [BlockStored((b"b",), block_size=32, group_idx=1)],
+        data_parallel_rank=0,
+    )
+    assert index.score_nodes((b"a", b"b"), 33)[0].matched_tokens == 32
+
+
+def test_configured_cache_group_layout_fails_closed_on_mismatch() -> None:
+    index = GlobalPrefixIndex()
+    index.register_node("tp2", hash_block_size=16, group_block_sizes={0: 16})
+    with pytest.raises(ValueError, match="unexpected KV cache group"):
+        index.apply_events("tp2", [BlockStored((b"a",), block_size=16, group_idx=1)])
+    with pytest.raises(ValueError, match="block size changed"):
+        index.apply_events("tp2", [BlockStored((b"a",), block_size=32, group_idx=0)])
 
 
 def test_event_gap_invalidation_forces_zero_prefix_score() -> None:
