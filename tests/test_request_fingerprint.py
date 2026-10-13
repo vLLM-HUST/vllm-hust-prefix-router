@@ -52,6 +52,18 @@ async def test_chat_fingerprint_rejects_non_text_content() -> None:
         )
 
 
+@pytest.mark.asyncio
+async def test_chat_template_override_falls_back_instead_of_misrouting() -> None:
+    with pytest.raises(UnsupportedFingerprintRequest, match="chat_template_kwargs"):
+        await _fingerprinter().fingerprint(
+            "/v1/chat/completions",
+            {
+                "messages": [{"role": "user", "content": "hi"}],
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+        )
+
+
 def test_external_integer_hash_is_normalized_to_eight_bytes() -> None:
     assert normalize_external_block_hash(1) == b"\x00" * 7 + b"\x01"
     assert normalize_external_block_hash(b"hash") == b"hash"

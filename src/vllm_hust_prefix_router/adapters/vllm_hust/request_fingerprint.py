@@ -1,4 +1,4 @@
-"""Text request fingerprinting compatible with the tested vLLM-HUST line."""
+"""Text request fingerprinting for compatible vLLM-HUST runtimes."""
 
 from __future__ import annotations
 
@@ -31,8 +31,8 @@ class VllmHustFingerprintConfig:
 
     tokenizer: str
     hash_block_size: int
-    hash_algorithm: str = "xxhash"
-    host_version_range: str = ">=0.23.1,<0.24"
+    hash_algorithm: str = "sha256"
+    host_version_range: str = ">=0.25.1,<0.30"
     tokenizer_revision: str | None = None
     trust_remote_code: bool = False
 
@@ -137,6 +137,9 @@ class VllmHustTextFingerprinter:
             "lora_request",
             "documents",
             "tools",
+            "chat_template",
+            "chat_template_kwargs",
+            "mm_processor_kwargs",
         )
         present = [name for name in unsupported if payload.get(name) not in (None, [])]
         if present:

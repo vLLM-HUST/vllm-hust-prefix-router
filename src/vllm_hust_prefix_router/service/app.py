@@ -143,7 +143,7 @@ class RouterService:
 
         observer = self._lifecycle_observer(request_id, payload, decision)
         if observer is not None:
-            observer.dispatch((node_id, backend.data_parallel_rank))
+            observer.dispatch((node_id, decision.data_parallel_rank))
 
         headers = self._upstream_headers(request.headers, backend)
         try:

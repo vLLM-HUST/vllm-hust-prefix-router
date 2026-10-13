@@ -52,6 +52,7 @@ class BackendConfig:
     event_endpoint: str | None = None
     replay_endpoint: str | None = None
     event_topic: str = ""
+    group_block_sizes: dict[int, int] = field(default_factory=dict)
     headers: dict[str, str] = field(default_factory=dict)
     pool: BackendPoolConfig = field(default_factory=BackendPoolConfig)
 
@@ -77,6 +78,16 @@ class BackendConfig:
             raise ValueError("event_endpoint must be non-empty")
         if self.replay_endpoint is not None and not self.replay_endpoint:
             raise ValueError("replay_endpoint must be non-empty")
+        if any(
+            not isinstance(group, int)
+            or isinstance(group, bool)
+            or group < 0
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or size <= 0
+            for group, size in self.group_block_sizes.items()
+        ):
+            raise ValueError("group_block_sizes must map group IDs to block sizes")
         if any(not key or "\n" in key or "\r" in key for key in self.headers):
             raise ValueError("backend header names must be non-empty single lines")
         if any("\n" in value or "\r" in value for value in self.headers.values()):

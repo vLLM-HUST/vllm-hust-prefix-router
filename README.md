@@ -33,6 +33,46 @@ Lifecycle accounting never consumes Scheduler snapshots. Removed V1/V2 cost
 models, dynamic Prefill-rate estimation, calibration, and fixed-duration
 reservations are intentionally absent.
 
+The default Lifecycle score charges uncached Prefill blocks and unique active
+prompt blocks. An active-request term is configurable but disabled by default
+(`active_request_weight=0`). These weights are not latency-calibrated; compare
+policies on the target model before making performance claims.
+
+## Current vLLM-HUST main and TP2
+
+The default host-version range is `>=0.25.1,<0.30`. The Router detects whether
+the host exports snapshot/epoch replay structs. The current 0.29.1 source uses
+an unversioned, sequence-frame replay stream instead. The Router can read
+that stream and build a conservative partial cache index, but it cannot prove
+publisher identity across restarts or reconstruct events lost outside the
+bounded replay buffer. For this reason it refuses unversioned replay by default.
+`allow_unversioned_replay=true` is an explicit best-effort opt-in, not a claim
+of equivalent recovery. Production use needs a host publisher with snapshot
+and generation support, or another verifiable full-state recovery mechanism.
+The fingerprint adapter defaults to the host's SHA-256 block hashing; configure
+the same hash algorithm and hash-block size on the Router and model service.
+Chat-template overrides fall back to the configured default backend instead of
+using an unsafe prefix estimate.
+
+Treat a TP2 model server as **one backend**, not as two tensor-rank backends.
+Two tensor ranks share one API endpoint and one KV event publisher for the
+serving instance. `data_parallel_rank` identifies the separate data-parallel
+publisher (normally `0` for one TP2 instance); it is not a tensor-rank number.
+If several TP2 instances serve traffic, give each instance its own backend ID,
+HTTP endpoint, event endpoint, and replay endpoint. The plugin never starts or
+configures tensor-parallel workers itself.
+
+For a hybrid model such as Qwen3.5-35B-A3B, set `group_block_sizes` for **all**
+KV groups using the worker's actual resolved cache configuration. The example
+JSON is for a single-group model and must not be copied unchanged for this
+model. `hash_block_size` is the worker's resolved *hash* block size; it may
+differ from the scheduler's block size when groups have different sizes. Keep
+the tokenizer revision, chat template, hash algorithm, `PYTHONHASHSEED`, and
+cache settings identical across the Router and all TP2 instances. Do not
+claim TP2 correctness from unit tests alone: verify 0.29.1 imports, event
+readiness, grouped cache hits, request forwarding, and final lifecycle release
+on the actual two-device serving stack before benchmarking.
+
 ## HTTP connection isolation
 
 Streaming generation occupies an HTTP/1.1 connection until the response ends.

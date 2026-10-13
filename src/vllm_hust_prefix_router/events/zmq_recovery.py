@@ -14,6 +14,8 @@ from vllm_hust_prefix_router.protocols.cache_events import CacheReplayResponse
 class ZmqEventCodec(Protocol):
     """Wire codec needed by the ZMQ event transport."""
 
+    snapshot_replay: bool
+
     def decode_batch(self, payload: bytes): ...
 
     def encode_replay_request(
@@ -62,12 +64,14 @@ class ZmqEventSubscriber:
         self.ready = False
         self.last_error: str | None = None
         self._task: asyncio.Task[None] | None = None
+        self._recovery_lock = asyncio.Lock()
         self._recovery = CacheEventRecovery(
             node_id=config.node_id,
             data_parallel_rank=config.data_parallel_rank,
             index=index,
             codec=codec,
             replay=self._request_replay,
+            snapshot_replay=codec.snapshot_replay,
         )
 
     async def start(self) -> None:
@@ -107,17 +111,36 @@ class ZmqEventSubscriber:
             try:
                 socket.setsockopt(zmq.SUBSCRIBE, self.config.topic.encode())
                 socket.connect(self.config.event_endpoint)
-                await self._recovery.initialize()
+                async with self._recovery_lock:
+                    await self._recovery.initialize()
                 self.ready = True
                 self.last_error = None
                 reconnect_delay = 0.1
                 sync_task = asyncio.create_task(self._periodic_sync())
                 while True:
-                    frames = await socket.recv_multipart()
-                    if len(frames) != 3 or len(frames[1]) != 8:
+                    receive_task = asyncio.ensure_future(socket.recv_multipart())
+                    try:
+                        done, _ = await asyncio.wait(
+                            (receive_task, sync_task),
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if sync_task in done:
+                            sync_task.result()
+                            raise RuntimeError("periodic KV recovery stopped")
+                        frames = receive_task.result()
+                    finally:
+                        if not receive_task.done():
+                            receive_task.cancel()
+                            await asyncio.gather(receive_task, return_exceptions=True)
+                    if (
+                        len(frames) != 3
+                        or frames[0] != self.config.topic.encode()
+                        or len(frames[1]) != 8
+                    ):
                         raise ValueError("malformed ZMQ KV event frames")
                     sequence = int.from_bytes(frames[1], "big")
-                    await self._recovery.apply_live(sequence, frames[2])
+                    async with self._recovery_lock:
+                        await self._recovery.apply_live(sequence, frames[2])
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -137,8 +160,9 @@ class ZmqEventSubscriber:
     async def _periodic_sync(self) -> None:
         while True:
             await asyncio.sleep(self.config.sync_interval_s)
-            response = await self._request_replay(self._recovery.state, False)
-            self._recovery.apply_replay(response)
+            async with self._recovery_lock:
+                response = await self._request_replay(self._recovery.state, False)
+                self._recovery.apply_replay(response)
 
     async def _request_replay(
         self, state: RecoveryState, force_snapshot: bool
@@ -147,6 +171,8 @@ class ZmqEventSubscriber:
         import zmq.asyncio
 
         context = zmq.asyncio.Context.instance()
+        if not self.codec.snapshot_replay:
+            return await self._request_sequence_replay(context, state)
         socket: Any = context.socket(zmq.REQ)
         socket.connect(self.config.replay_endpoint)
         try:
@@ -160,5 +186,50 @@ class ZmqEventSubscriber:
                 socket.recv(), timeout=self.config.replay_timeout_s
             )
             return self.codec.decode_replay_response(response)
+        finally:
+            socket.close(linger=0)
+
+    async def _request_sequence_replay(
+        self, context: Any, state: RecoveryState
+    ) -> CacheReplayResponse:
+        """Read the bounded sequence-frame stream used by newer hosts."""
+        import zmq
+
+        start_seq = state.next_seq or 0
+        socket: Any = context.socket(zmq.DEALER)
+        socket.connect(self.config.replay_endpoint)
+        batches: list[tuple[int, bytes]] = []
+        try:
+            await socket.send_multipart((b"", start_seq.to_bytes(8, "big")))
+            while True:
+                frames = await asyncio.wait_for(
+                    socket.recv_multipart(), timeout=self.config.replay_timeout_s
+                )
+                if len(frames) == 3:
+                    delimiter, sequence_frame, payload = frames
+                    topic = None
+                elif len(frames) == 4:
+                    delimiter, topic, sequence_frame, payload = frames
+                else:
+                    raise ValueError(
+                        "malformed sequence replay frames: "
+                        f"frame lengths {[len(frame) for frame in frames]}"
+                    )
+                if delimiter != b"" or len(sequence_frame) != 8:
+                    raise ValueError("malformed sequence replay frame header")
+                if sequence_frame == b"\xff" * 8:
+                    if topic not in (None, b"") or payload != b"":
+                        raise ValueError("malformed sequence replay terminator")
+                    break
+                if topic is not None and topic != self.config.topic.encode():
+                    raise ValueError("sequence replay topic does not match")
+                sequence = int.from_bytes(sequence_frame, "big")
+                batches.append((sequence, payload))
+            next_seq = batches[-1][0] + 1 if batches else start_seq
+            return CacheReplayResponse(
+                publisher_epoch="unversioned",
+                next_seq=next_seq,
+                replayed_batches=tuple(batches),
+            )
         finally:
             socket.close(linger=0)

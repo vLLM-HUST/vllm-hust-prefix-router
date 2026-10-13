@@ -127,6 +127,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--site-packages", type=Path, required=True)
     parser.add_argument("--vllm-source", type=Path, required=True)
     parser.add_argument("--ascend-source", type=Path, required=True)
+    parser.add_argument("--rates", default="2,8,16,24,32,40,48")
+    parser.add_argument("--tensor-parallel-size", type=int, default=1)
+    parser.add_argument("--max-model-len", type=int, default=4096)
+    parser.add_argument("--max-concurrency", type=int, default=256)
+    parser.add_argument("--allow-unversioned-replay", action="store_true")
+    parser.add_argument("--group-block-sizes", default='{"0":128}')
+    parser.add_argument("--host-version-range", default=">=0.29.1,<0.30")
     parser.add_argument("--devices", default="0,1,2,3")
     parser.add_argument("--repetitions", default="0,1,2")
     parser.add_argument("--rate-indices", default="0,1,2,3,4,5,6")
@@ -136,18 +143,21 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    rates = tuple(float(value.strip()) for value in args.rates.split(","))
+    if not rates or any(rate <= 0 for rate in rates):
+        raise SystemExit("--rates must contain positive values")
     args.result_root.mkdir(parents=True, exist_ok=True)
     devices = [value.strip() for value in args.devices.split(",") if value.strip()]
     repetitions = parse_int_list(args.repetitions)
     rate_indices = parse_int_list(args.rate_indices)
     if any(value not in range(3) for value in repetitions):
         raise SystemExit("repetitions must be selected from 0,1,2")
-    if any(value not in range(len(RATES)) for value in rate_indices):
-        raise SystemExit("rate indices must be selected from 0..6")
+    if any(value not in range(len(rates)) for value in rate_indices):
+        raise SystemExit("rate indices must be selected from --rates")
     progress_path = args.result_root / "matrix-progress.json"
     completed_points: list[dict[str, Any]] = []
     for rep, rate_index, policy in point_order(repetitions, rate_indices):
-        rate = RATES[rate_index]
+        rate = rates[rate_index]
         existing = successful_evidence(args.result_root, policy, rep, rate)
         if existing is not None:
             completed_points.append(
@@ -205,7 +215,19 @@ def main() -> None:
             str(args.vllm_source),
             "--ascend-source",
             str(args.ascend_source),
+            "--tensor-parallel-size",
+            str(args.tensor_parallel_size),
+            "--max-model-len",
+            str(args.max_model_len),
+            "--max-concurrency",
+            str(args.max_concurrency),
+            "--group-block-sizes",
+            args.group_block_sizes,
+            "--host-version-range",
+            args.host_version_range,
         ]
+        if args.allow_unversioned_replay:
+            command.append("--allow-unversioned-replay")
         log_path = args.result_root / (f"matrix-rep-{rep}-rate-{rate:g}-{policy}.log")
         result = run(command)
         log_path.write_text(result.stdout, encoding="utf-8")
@@ -240,6 +262,8 @@ def main() -> None:
             str(args.summarizer),
             "--result-root",
             str(args.result_root),
+            "--expected-pairs",
+            str(len(repetitions) * len(rate_indices)),
         ]
     )
     (args.result_root / "summary.log").write_text(summary.stdout, encoding="utf-8")

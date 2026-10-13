@@ -51,6 +51,7 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
         "backends",
         "fingerprint",
         "lifecycle",
+        "allow_unversioned_replay",
         "max_request_body_size",
     }
     unknown = raw.keys() - allowed
@@ -82,13 +83,6 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
     backends = tuple(_backend(value) for value in raw_backends)
 
     prefix_index = GlobalPrefixIndex()
-    for backend in backends:
-        prefix_index.register_node(
-            backend.node_id,
-            hash_block_size=block_size,
-            data_parallel_rank=backend.data_parallel_rank,
-            group_block_sizes={0: block_size},
-        )
 
     lifecycle_tracker = None
     if policy == "lifecycle":
@@ -107,9 +101,9 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
     fingerprint_config = VllmHustFingerprintConfig(
         tokenizer=_required_string(fingerprint_values, "tokenizer"),
         hash_block_size=block_size,
-        hash_algorithm=fingerprint_values.get("hash_algorithm", "xxhash"),
+        hash_algorithm=fingerprint_values.get("hash_algorithm", "sha256"),
         host_version_range=fingerprint_values.get(
-            "host_version_range", ">=0.23.1,<0.24"
+            "host_version_range", ">=0.25.1,<0.30"
         ),
         tokenizer_revision=fingerprint_values.get("tokenizer_revision"),
         trust_remote_code=fingerprint_values.get("trust_remote_code", False),
@@ -125,6 +119,31 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
     if not isinstance(default_backend, str):
         raise ValueError("default_backend must be a string")
     event_codec = VllmHustKvEventCodec(fingerprint_config.host_version_range)
+    allow_unversioned = raw.get("allow_unversioned_replay", False)
+    if not isinstance(allow_unversioned, bool):
+        raise ValueError("allow_unversioned_replay must be a boolean")
+    if not event_codec.snapshot_replay and not allow_unversioned:
+        raise ValueError(
+            "the host has no snapshot/epoch replay; set "
+            "allow_unversioned_replay=true only for best-effort deployments"
+        )
+    for backend in backends:
+        if not event_codec.snapshot_replay and not backend.group_block_sizes:
+            raise ValueError(
+                f"backend {backend.node_id!r} requires group_block_sizes "
+                "without cache snapshots"
+            )
+        if not event_codec.snapshot_replay and backend.data_parallel_rank is None:
+            raise ValueError(
+                f"backend {backend.node_id!r} requires data_parallel_rank "
+                "without cache snapshots"
+            )
+        prefix_index.register_node(
+            backend.node_id,
+            hash_block_size=block_size,
+            data_parallel_rank=backend.data_parallel_rank,
+            group_block_sizes=backend.group_block_sizes or {0: block_size},
+        )
     event_sources = []
     for backend in backends:
         if backend.event_endpoint is None or backend.replay_endpoint is None:
@@ -166,6 +185,7 @@ def _backend(raw: Any) -> BackendConfig:
         "event_endpoint",
         "replay_endpoint",
         "event_topic",
+        "group_block_sizes",
         "headers_from_env",
         "pool",
     }
@@ -177,6 +197,17 @@ def _backend(raw: Any) -> BackendConfig:
     if unknown_pool:
         raise ValueError(f"unsupported backend pool keys: {sorted(unknown_pool)}")
     env_headers = _mapping(value.get("headers_from_env", {}), "headers_from_env")
+    raw_group_sizes = _mapping(value.get("group_block_sizes", {}), "group_block_sizes")
+    try:
+        group_block_sizes = {
+            int(group): size for group, size in raw_group_sizes.items()
+        }
+    except (ValueError, TypeError) as exc:
+        raise ValueError("group_block_sizes keys must be integer strings") from exc
+    if len(group_block_sizes) != len(raw_group_sizes) or any(
+        str(group) not in raw_group_sizes for group in group_block_sizes
+    ):
+        raise ValueError("group_block_sizes keys must be canonical integer strings")
     headers: dict[str, str] = {}
     for header, environment_name in env_headers.items():
         if not isinstance(header, str) or not isinstance(environment_name, str):
@@ -194,6 +225,7 @@ def _backend(raw: Any) -> BackendConfig:
         event_endpoint=value.get("event_endpoint"),
         replay_endpoint=value.get("replay_endpoint"),
         event_topic=value.get("event_topic", ""),
+        group_block_sizes=group_block_sizes,
         headers=headers,
         pool=BackendPoolConfig(**pool_values),
     )

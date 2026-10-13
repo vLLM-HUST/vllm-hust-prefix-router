@@ -1,4 +1,4 @@
-"""Decode the tested vLLM-HUST KV-event and replay wire formats."""
+"""Decode compatible vLLM-HUST KV-event and replay wire formats."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from vllm_hust_prefix_router.protocols.cache_events import (
 class VllmHustKvEventCodec:
     """Narrow, version-checked adapter for vLLM-HUST event structs."""
 
-    def __init__(self, host_version_range: str = ">=0.23.1,<0.24") -> None:
+    def __init__(self, host_version_range: str = ">=0.25.1,<0.30") -> None:
         try:
             installed_version = version("vllm")
         except PackageNotFoundError as exc:
@@ -36,24 +36,27 @@ class VllmHustKvEventCodec:
             )
 
         import msgspec
+        from vllm.distributed import kv_events
         from vllm.distributed.kv_events import (
             AllBlocksCleared as HostAllBlocksCleared,
         )
         from vllm.distributed.kv_events import BlockRemoved as HostBlockRemoved
         from vllm.distributed.kv_events import BlockStored as HostBlockStored
-        from vllm.distributed.kv_events import (
-            KVEventBatch,
-            ZmqEventReplayRequest,
-            ZmqEventReplayResponse,
-        )
 
+        KVEventBatch = kv_events.KVEventBatch
         self._msgspec = msgspec
         self._host_stored = HostBlockStored
         self._host_removed = HostBlockRemoved
         self._host_cleared = HostAllBlocksCleared
         self._batch_decoder = msgspec.msgpack.Decoder(type=KVEventBatch)
-        self._replay_decoder = msgspec.msgpack.Decoder(type=ZmqEventReplayResponse)
-        self._replay_request = ZmqEventReplayRequest
+        replay_request = getattr(kv_events, "ZmqEventReplayRequest", None)
+        replay_response = getattr(kv_events, "ZmqEventReplayResponse", None)
+        self.snapshot_replay = (
+            replay_request is not None and replay_response is not None
+        )
+        if self.snapshot_replay:
+            self._replay_decoder = msgspec.msgpack.Decoder(type=replay_response)
+            self._replay_request = replay_request
         self._encoder = msgspec.msgpack.Encoder()
 
     def decode_batch(self, payload: bytes) -> CacheEventBatch:
@@ -102,6 +105,8 @@ class VllmHustKvEventCodec:
         force_snapshot: bool,
     ) -> bytes:
         """Encode one host replay request."""
+        if not self.snapshot_replay:
+            raise RuntimeError("this host uses sequence-frame replay")
         request = self._replay_request(
             publisher_epoch=publisher_epoch,
             start_seq=start_seq,
@@ -111,6 +116,8 @@ class VllmHustKvEventCodec:
 
     def decode_replay_response(self, payload: bytes) -> CacheReplayResponse:
         """Decode the host replay response while preserving batch payloads."""
+        if not self.snapshot_replay:
+            raise RuntimeError("this host uses sequence-frame replay")
         response: Any = self._replay_decoder.decode(payload)
         return CacheReplayResponse(
             publisher_epoch=response.publisher_epoch,

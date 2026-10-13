@@ -20,6 +20,7 @@ class LifecycleRoutingConfig:
 
     prefill_load_weight: float = 1.0
     active_request_weight: float = 0.0
+    decode_block_weight: float = 1.0
     selection_temperature: float = 0.0
     track_output_blocks: bool = False
     request_expiry_s: float = 300.0
@@ -28,6 +29,7 @@ class LifecycleRoutingConfig:
         for name, value in (
             ("prefill_load_weight", self.prefill_load_weight),
             ("active_request_weight", self.active_request_weight),
+            ("decode_block_weight", self.decode_block_weight),
             ("selection_temperature", self.selection_temperature),
             ("request_expiry_s", self.request_expiry_s),
         ):
@@ -485,7 +487,7 @@ class LifecycleLoadTracker:
         )
         cost = (
             self.config.prefill_load_weight * potential_prefill_blocks
-            + potential_decode_blocks
+            + self.config.decode_block_weight * potential_decode_blocks
             + active_request_cost
         )
         return CandidateLoadScore(

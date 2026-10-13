@@ -1,4 +1,7 @@
+import asyncio
 import json
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import pytest
 from aiohttp import web
@@ -154,6 +157,45 @@ async def test_lifecycle_reservation_is_released_after_stream_completion() -> No
 
 
 @pytest.mark.asyncio
+async def test_lifecycle_dispatch_uses_selected_dp_rank(monkeypatch) -> None:
+    upstream, _ = await _upstream()
+    index = GlobalPrefixIndex()
+    index.register_node("node-0", hash_block_size=16, data_parallel_rank=0)
+    tracker = LifecycleLoadTracker(block_size=16)
+    dispatched = []
+    original_dispatch = tracker.mark_dispatched
+
+    def record_dispatch(request_id, worker):
+        dispatched.append(worker)
+        return original_dispatch(request_id, worker)
+
+    monkeypatch.setattr(tracker, "mark_dispatched", record_dispatch)
+    service = RouterService(
+        RouterServiceConfig(
+            (BackendConfig("node-0", str(upstream.make_url("/"))),),
+            default_backend="node-0",
+        ),
+        planner=RoutePlanner(
+            index, policy="lifecycle", block_size=16, lifecycle_tracker=tracker
+        ),
+        fingerprinter=FakeFingerprinter(),
+    )
+    client = TestClient(TestServer(create_app(service)))
+    await client.start_server()
+    try:
+        response = await client.post(
+            "/v1/completions", json={"prompt": "hello", "stream": True}
+        )
+        assert response.status == 200
+        await response.read()
+        assert dispatched == [("node-0", 0)]
+        assert tracker.active_request_ids() == ()
+    finally:
+        await client.close()
+        await upstream.close()
+
+
+@pytest.mark.asyncio
 async def test_unsupported_fingerprint_uses_explicit_default_backend() -> None:
     upstream, received = await _upstream()
     index = GlobalPrefixIndex()
@@ -216,3 +258,48 @@ def test_downstream_headers_preserve_content_encoding() -> None:
         "Connection": "close",
     }
     assert RouterService._downstream_headers(headers) == {"Content-Encoding": "gzip"}
+
+
+@pytest.mark.asyncio
+async def test_cancelled_dispatch_releases_lifecycle_reservation(monkeypatch) -> None:
+    index = GlobalPrefixIndex()
+    index.register_node("node-0", hash_block_size=16)
+    tracker = LifecycleLoadTracker(block_size=16)
+    service = RouterService(
+        RouterServiceConfig((BackendConfig("node-0", "http://127.0.0.1:1"),), "node-0"),
+        planner=RoutePlanner(
+            index, policy="lifecycle", block_size=16, lifecycle_tracker=tracker
+        ),
+        fingerprinter=FakeFingerprinter(),
+    )
+    entered = asyncio.Event()
+
+    class BlockingPool:
+        @asynccontextmanager
+        async def request(self, *_args, **_kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+            yield
+
+    monkeypatch.setattr(service.pools, "pool", lambda _node_id: BlockingPool())
+
+    async def read_body():
+        return b'{"prompt":"hello","stream":true}'
+
+    request = SimpleNamespace(
+        content_length=None,
+        read=read_body,
+        headers={},
+        path="/v1/completions",
+        method="POST",
+        path_qs="/v1/completions",
+    )
+    task = asyncio.create_task(service.handle_generation(request))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    assert len(tracker.active_request_ids()) == 1
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert tracker.active_request_ids() == ()
+    load = tracker.worker_load(("node-0", None))
+    assert load.active_requests == load.tracked_requests == 0
