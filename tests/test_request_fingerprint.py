@@ -15,6 +15,7 @@ class FakeTokenizer:
 
     def apply_chat_template(self, _messages, **kwargs):
         assert kwargs["tokenize"]
+        assert kwargs["return_dict"] is False
         return [10, 11, 12, 13]
 
     def decode(self, _tokens, _skip_special_tokens=False):
@@ -67,3 +68,39 @@ async def test_chat_template_override_falls_back_instead_of_misrouting() -> None
 def test_external_integer_hash_is_normalized_to_eight_bytes() -> None:
     assert normalize_external_block_hash(1) == b"\x00" * 7 + b"\x01"
     assert normalize_external_block_hash(b"hash") == b"hash"
+
+
+@pytest.mark.asyncio
+async def test_chat_requests_list_return_on_transformers_v5():
+    class V5Tokenizer(FakeTokenizer):
+        def apply_chat_template(self, _messages, **kwargs):
+            ids = [10, 11, 12, 13]
+            return ids if kwargs.get("return_dict") is False else {"input_ids": ids}
+
+    fingerprinter = VllmHustTextFingerprinter(
+        VllmHustFingerprintConfig("fake", hash_block_size=2),
+        _tokenizer=V5Tokenizer(),
+        _hash_tokens=lambda tokens: (len(tokens).to_bytes(2, "big"),),
+    )
+    result = await fingerprinter.fingerprint(
+        "/v1/chat/completions", {"messages": [{"role": "user", "content": "hello"}]}
+    )
+    assert result[0].num_tokens == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rendered", [[True], [-1], [[1]], {"input_ids": [1]}])
+async def test_chat_rejects_invalid_or_unexpected_token_shapes(rendered):
+    class InvalidTokenizer(FakeTokenizer):
+        def apply_chat_template(self, _messages, **_kwargs):
+            return rendered
+
+    fingerprinter = VllmHustTextFingerprinter(
+        VllmHustFingerprintConfig("fake", hash_block_size=2),
+        _tokenizer=InvalidTokenizer(),
+        _hash_tokens=lambda _tokens: (),
+    )
+    with pytest.raises(UnsupportedFingerprintRequest, match="token IDs"):
+        await fingerprinter.fingerprint(
+            "/v1/chat/completions", {"messages": [{"role": "user", "content": "hello"}]}
+        )

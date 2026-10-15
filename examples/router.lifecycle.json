@@ -32,7 +32,8 @@
       "pool": {
         "max_connections": 512,
         "max_pending_requests": 512,
-        "queue_timeout_s": 1.0
+        "queue_timeout_s": 1.0,
+        "keepalive_timeout_s": 2.0
       }
     },
     {
@@ -45,7 +46,8 @@
       "pool": {
         "max_connections": 512,
         "max_pending_requests": 512,
-        "queue_timeout_s": 1.0
+        "queue_timeout_s": 1.0,
+        "keepalive_timeout_s": 2.0
       }
     },
     {
@@ -58,7 +60,8 @@
       "pool": {
         "max_connections": 512,
         "max_pending_requests": 512,
-        "queue_timeout_s": 1.0
+        "queue_timeout_s": 1.0,
+        "keepalive_timeout_s": 2.0
       }
     },
     {
@@ -71,7 +74,8 @@
       "pool": {
         "max_connections": 512,
         "max_pending_requests": 512,
-        "queue_timeout_s": 1.0
+        "queue_timeout_s": 1.0,
+        "keepalive_timeout_s": 2.0
       }
     }
   ]
