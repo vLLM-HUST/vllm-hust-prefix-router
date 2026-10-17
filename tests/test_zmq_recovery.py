@@ -2,6 +2,7 @@ import asyncio
 import sys
 import uuid
 
+import pytest
 import zmq
 import zmq.asyncio
 
@@ -20,6 +21,55 @@ from vllm_hust_prefix_router.protocols.cache_events import (
 
 class SequenceCodec:
     snapshot_replay = False
+
+
+@pytest.mark.parametrize("fault", ["timeout", "count", "bytes", "gap", "stale"])
+def test_sequence_replay_rejects_incomplete_or_unbounded_responses(fault):
+    _run(_invalid_sequence_replay(fault))
+
+
+async def _invalid_sequence_replay(fault):
+    context = zmq.asyncio.Context.instance()
+    endpoint = f"inproc://bounded-replay-{uuid.uuid4().hex}"
+    publisher = context.socket(zmq.ROUTER)
+    publisher.bind(endpoint)
+    subscriber = ZmqEventSubscriber(
+        ZmqEventSourceConfig(
+            node_id="node",
+            event_endpoint="inproc://unused",
+            replay_endpoint=endpoint,
+            replay_timeout_s=0.05,
+            max_replay_batches=1 if fault == "count" else 10,
+            max_replay_bytes=8 if fault == "bytes" else 1024,
+        ),
+        index=GlobalPrefixIndex(),
+        codec=SequenceCodec(),
+    )
+
+    async def send():
+        identity, delimiter, _start = await publisher.recv_multipart()
+        assert delimiter == b""
+        sequences = [6] if fault == "stale" else [7, 9 if fault == "gap" else 8]
+        if fault == "timeout":
+            sequences = [7]
+        for seq in sequences:
+            await publisher.send_multipart(
+                (identity, b"", seq.to_bytes(8, "big"), b"batch")
+            )
+        # Deliberately no terminator: no partial response may be published.
+
+    task = asyncio.create_task(send())
+    try:
+        expected = asyncio.TimeoutError if fault == "timeout" else ValueError
+        with pytest.raises(expected):
+            await subscriber._request_replay(RecoveryState(next_seq=7), False)
+        await task
+        assert subscriber._recovery.state.next_seq is None
+        assert not subscriber.ready
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        publisher.close(linger=0)
 
 
 class SnapshotCodec:

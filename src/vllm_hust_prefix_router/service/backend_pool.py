@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -12,6 +12,7 @@ from typing import Any
 import aiohttp
 
 from vllm_hust_prefix_router.config import BackendConfig
+from vllm_hust_prefix_router.service.timing import RequestTiming
 
 
 class BackendPoolSaturated(RuntimeError):
@@ -104,8 +105,10 @@ class BackendConnectionPool:
         )
 
     @asynccontextmanager
-    async def _admit(self) -> AsyncIterator[None]:
+    async def _admit(self, timing: RequestTiming | None = None) -> AsyncIterator[None]:
         pool = self.config.pool
+        if timing is not None:
+            timing.mark("admission_start")
         if self._slots.locked() and self._queued_requests >= pool.max_pending_requests:
             self._rejected_requests += 1
             raise BackendPoolSaturated(
@@ -132,6 +135,8 @@ class BackendConnectionPool:
         self._max_queue_wait_s = max(self._max_queue_wait_s, queue_wait_s)
         self._active_requests += 1
         self._admitted_requests += 1
+        if timing is not None:
+            timing.mark("pool_admitted")
         try:
             yield
         finally:
@@ -150,21 +155,48 @@ class BackendConnectionPool:
         path: str,
         *,
         headers: Mapping[str, str] | None = None,
+        timing: RequestTiming | None = None,
+        before_dispatch: Callable[[], None] | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[aiohttp.ClientResponse]:
         """Dispatch one request while holding an admission slot through streaming."""
         merged_headers = dict(headers or {})
-        merged_headers.update(self.config.headers)
-        async with (
-            self._admit(),
-            self.session.request(
+        if self.config.headers:
+            rank_header = "x-data-parallel-rank"
+            selected_rank = next(
+                (
+                    value
+                    for key, value in merged_headers.items()
+                    if key.lower() == rank_header
+                ),
+                None,
+            )
+            merged_headers.update(self.config.headers)
+            if selected_rank is not None:
+                # Backend credentials still override client headers, but a static
+                # header must not replace the Router's selected rank or add a
+                # second differently cased copy of that routing header.
+                merged_headers = {
+                    key: value
+                    for key, value in merged_headers.items()
+                    if key.lower() != rank_header
+                }
+                merged_headers[rank_header] = selected_rank
+        async with self._admit(timing):
+            # Admission can yield while an incarnation or cache view changes.
+            # The synchronous guard runs with the slot held and may refuse the
+            # request before constructing its HTTP transport. It cannot retry.
+            if before_dispatch is not None:
+                before_dispatch()
+            async with self.session.request(
                 method,
                 self._target_url(path),
                 headers=merged_headers,
                 **kwargs,
-            ) as response,
-        ):
-            yield response
+            ) as response:
+                if timing is not None:
+                    timing.mark("upstream_headers")
+                yield response
 
 
 class BackendPoolRegistry:

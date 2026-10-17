@@ -55,6 +55,7 @@ class BackendConfig:
     group_block_sizes: dict[int, int] = field(default_factory=dict)
     headers: dict[str, str] = field(default_factory=dict)
     pool: BackendPoolConfig = field(default_factory=BackendPoolConfig)
+    managed_lease_path: str | None = None
 
     def __post_init__(self) -> None:
         if not self.node_id.strip():
@@ -92,3 +93,8 @@ class BackendConfig:
             raise ValueError("backend header names must be non-empty single lines")
         if any("\n" in value or "\r" in value for value in self.headers.values()):
             raise ValueError("backend header values must be single lines")
+        if self.managed_lease_path is not None and (
+            not isinstance(self.managed_lease_path, str)
+            or not self.managed_lease_path.startswith("/")
+        ):
+            raise ValueError("managed_lease_path must be an absolute Linux path")
