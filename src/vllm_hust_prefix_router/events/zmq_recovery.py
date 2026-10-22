@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -40,12 +41,20 @@ class ZmqEventSourceConfig:
     topic: str = ""
     replay_timeout_s: float = 2.0
     sync_interval_s: float = 5.0
+    max_replay_batches: int = 10000
+    max_replay_bytes: int = 64 * 1024 * 1024
 
     def __post_init__(self) -> None:
         if not self.node_id or not self.event_endpoint or not self.replay_endpoint:
             raise ValueError("node and ZMQ endpoints must be non-empty")
-        if self.replay_timeout_s <= 0 or self.sync_interval_s <= 0:
-            raise ValueError("ZMQ recovery timeouts must be positive")
+        if any(
+            not math.isfinite(value) or value <= 0
+            for value in (self.replay_timeout_s, self.sync_interval_s)
+        ):
+            raise ValueError("ZMQ recovery timeouts must be finite and positive")
+        for value in (self.max_replay_batches, self.max_replay_bytes):
+            if type(value) is not int or value <= 0:
+                raise ValueError("ZMQ replay limits must be positive integers")
 
 
 class ZmqEventSubscriber:
@@ -64,7 +73,6 @@ class ZmqEventSubscriber:
         self.ready = False
         self.last_error: str | None = None
         self._task: asyncio.Task[None] | None = None
-        self._recovery_lock = asyncio.Lock()
         self._recovery = CacheEventRecovery(
             node_id=config.node_id,
             data_parallel_rank=config.data_parallel_rank,
@@ -97,6 +105,11 @@ class ZmqEventSubscriber:
             "last_error": self.last_error,
             "publisher_epoch": self._recovery.state.publisher_epoch,
             "next_seq": self._recovery.state.next_seq,
+            "recovery_basis": (
+                "publisher_snapshot_epoch"
+                if self.codec.snapshot_replay
+                else "unversioned_best_effort"
+            ),
         }
 
     async def _run(self) -> None:
@@ -108,30 +121,29 @@ class ZmqEventSubscriber:
         while True:
             socket = context.socket(zmq.SUB)
             sync_task: asyncio.Task[None] | None = None
+            receive_task: asyncio.Future | None = None
             try:
                 socket.setsockopt(zmq.SUBSCRIBE, self.config.topic.encode())
                 socket.connect(self.config.event_endpoint)
-                async with self._recovery_lock:
-                    await self._recovery.initialize()
+                await self._recovery.initialize()
                 self.ready = True
                 self.last_error = None
                 reconnect_delay = 0.1
                 sync_task = asyncio.create_task(self._periodic_sync())
                 while True:
                     receive_task = asyncio.ensure_future(socket.recv_multipart())
-                    try:
-                        done, _ = await asyncio.wait(
-                            (receive_task, sync_task),
-                            return_when=asyncio.FIRST_COMPLETED,
-                        )
-                        if sync_task in done:
-                            sync_task.result()
-                            raise RuntimeError("periodic KV recovery stopped")
-                        frames = receive_task.result()
-                    finally:
-                        if not receive_task.done():
-                            receive_task.cancel()
-                            await asyncio.gather(receive_task, return_exceptions=True)
+                    await asyncio.wait(
+                        (receive_task, sync_task),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    # Prioritize failure even if a live frame arrived concurrently.
+                    if sync_task.done():
+                        if sync_task.cancelled():
+                            raise RuntimeError("periodic synchronization was cancelled")
+                        sync_task.result()
+                        raise RuntimeError("periodic synchronization exited")
+                    frames = receive_task.result()
+                    receive_task = None
                     if (
                         len(frames) != 3
                         or frames[0] != self.config.topic.encode()
@@ -139,8 +151,7 @@ class ZmqEventSubscriber:
                     ):
                         raise ValueError("malformed ZMQ KV event frames")
                     sequence = int.from_bytes(frames[1], "big")
-                    async with self._recovery_lock:
-                        await self._recovery.apply_live(sequence, frames[2])
+                    await self._recovery.apply_live(sequence, frames[2])
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -149,20 +160,21 @@ class ZmqEventSubscriber:
                 self.index.invalidate_node(
                     self.config.node_id, self.config.data_parallel_rank
                 )
-                await asyncio.sleep(reconnect_delay)
-                reconnect_delay = min(reconnect_delay * 2, 5.0)
             finally:
+                if receive_task is not None:
+                    receive_task.cancel()
+                    await asyncio.gather(receive_task, return_exceptions=True)
                 if sync_task is not None:
                     sync_task.cancel()
                     await asyncio.gather(sync_task, return_exceptions=True)
                 socket.close(linger=0)
+            await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, 5.0)
 
     async def _periodic_sync(self) -> None:
         while True:
             await asyncio.sleep(self.config.sync_interval_s)
-            async with self._recovery_lock:
-                response = await self._request_replay(self._recovery.state, False)
-                self._recovery.apply_replay(response)
+            await self._recovery.synchronize()
 
     async def _request_replay(
         self, state: RecoveryState, force_snapshot: bool
@@ -199,11 +211,14 @@ class ZmqEventSubscriber:
         socket: Any = context.socket(zmq.DEALER)
         socket.connect(self.config.replay_endpoint)
         batches: list[tuple[int, bytes]] = []
+        total_bytes = 0
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.config.replay_timeout_s
         try:
             await socket.send_multipart((b"", start_seq.to_bytes(8, "big")))
             while True:
                 frames = await asyncio.wait_for(
-                    socket.recv_multipart(), timeout=self.config.replay_timeout_s
+                    socket.recv_multipart(), timeout=max(0, deadline - loop.time())
                 )
                 if len(frames) == 3:
                     delimiter, sequence_frame, payload = frames
@@ -224,6 +239,14 @@ class ZmqEventSubscriber:
                 if topic is not None and topic != self.config.topic.encode():
                     raise ValueError("sequence replay topic does not match")
                 sequence = int.from_bytes(sequence_frame, "big")
+                total_bytes += sum(len(frame) for frame in frames)
+                if (
+                    len(batches) >= self.config.max_replay_batches
+                    or total_bytes > self.config.max_replay_bytes
+                ):
+                    raise ValueError("sequence replay exceeds bounded response limits")
+                if sequence < start_seq or (batches and sequence != batches[-1][0] + 1):
+                    raise ValueError("sequence replay is stale or non-contiguous")
                 batches.append((sequence, payload))
             next_seq = batches[-1][0] + 1 if batches else start_seq
             return CacheReplayResponse(

@@ -46,3 +46,18 @@ The migration does not include Scheduler snapshot load supplementation, V1/V2
 cost models, dynamic Prefill-rate estimation, calibration, fixed-duration
 reservations, TTFT/transfer routing models, or their dedicated tests.
 
+## Reliability increment
+
+The reliability work began on public PR #2 (`8115ed5`) and this review candidate
+is integrated on PR #4 (`04142b2`). LPM, HTTP forwarding,
+connection pools and lifecycle routing remain baseline features, not new claims.
+The reliability changes were developed against those public interfaces; no private
+production module, session-registration service or old performance claim is copied.
+See [scope and compatibility](docs/reliability.md) for the selected concepts.
+
+Only the independently useful deterministic HTTP fault matrix is included from
+the research toolset. Historical environment builders, performance diagnostics,
+hardware-specific launchers, raw traces and an unused evidence-validator module
+are archived separately. Their omission does not authorize rewriting past results.
+Code and review used Codex assistance; maintainer review and remote CI remain
+separate gates. The Apache-2.0 licensing of baseline and new files is unchanged.

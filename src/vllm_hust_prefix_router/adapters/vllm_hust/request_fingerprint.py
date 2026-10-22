@@ -140,6 +140,7 @@ class VllmHustTextFingerprinter:
             "chat_template",
             "chat_template_kwargs",
             "mm_processor_kwargs",
+            "tool_choice",
         )
         present = [name for name in unsupported if payload.get(name) not in (None, [])]
         if present:
@@ -223,9 +224,10 @@ class VllmHustTextFingerprinter:
             tokenize=True,
             add_generation_prompt=add_generation_prompt,
             continue_final_message=continue_final_message,
+            return_dict=False,
         )
         if not isinstance(rendered, list) or not all(
-            isinstance(token, int) for token in rendered
+            type(token) is int and token >= 0 for token in rendered
         ):
             raise UnsupportedFingerprintRequest(
                 "tokenizer chat template did not return token IDs"

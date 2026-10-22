@@ -22,6 +22,10 @@ from vllm_hust_prefix_router.core.lifecycle import (
 )
 from vllm_hust_prefix_router.core.planner import RoutePlanner
 from vllm_hust_prefix_router.core.prefix_index import GlobalPrefixIndex
+from vllm_hust_prefix_router.events.native_replay import (
+    NativeReplayConfig,
+    NativeReplaySubscriber,
+)
 from vllm_hust_prefix_router.events.zmq_recovery import (
     ZmqEventSourceConfig,
     ZmqEventSubscriber,
@@ -53,10 +57,35 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
         "lifecycle",
         "allow_unversioned_replay",
         "max_request_body_size",
+        "runtime_profile",
+        "native_replay",
+        "require_trusted_cache_view",
+        "observe_request_timings",
     }
     unknown = raw.keys() - allowed
     if unknown:
         raise ValueError(f"unsupported Router configuration keys: {sorted(unknown)}")
+    profile = raw.get("runtime_profile", "public")
+    if profile not in {
+        "public",
+        "pr2-enhanced",
+        "managed-native-0fc695f-v1",
+        "managed-hust-cedb477-v1",
+    }:
+        raise ValueError("unsupported runtime_profile")
+    native = profile.startswith("managed-")
+    if not native and "native_replay" in raw:
+        raise ValueError("native_replay requires the managed native profile")
+    allow_unversioned = raw.get("allow_unversioned_replay", False)
+    if not isinstance(allow_unversioned, bool):
+        raise ValueError("allow_unversioned_replay must be a boolean")
+    if allow_unversioned and (
+        profile != "public" or raw.get("require_trusted_cache_view", False)
+    ):
+        raise ValueError(
+            "unversioned best-effort replay requires public profile "
+            "and non-strict admission"
+        )
 
     listen = _mapping(raw.get("listen", {}), "listen")
     host = listen.get("host", "127.0.0.1")
@@ -98,12 +127,42 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
         )
 
     fingerprint_values = _mapping(raw.get("fingerprint"), "fingerprint")
+    if native:
+        from vllm_hust_prefix_router.adapters.vllm_hust.native_profile import (
+            NativeKvEventCodec,
+            model_identity,
+        )
+
+        native_host_range = "==0.23.0+empty"
+        if profile == "managed-hust-cedb477-v1":
+            from vllm_hust_prefix_router.adapters.vllm_hust.hust_native_profile import (
+                HOST_VERSION,
+                HustNativeKvEventCodec,
+                model_identity,
+            )
+
+            NativeKvEventCodec = HustNativeKvEventCodec
+            native_host_range = f"=={HOST_VERSION}"
+
+        if (
+            block_size != 128
+            or fingerprint_values.get("hash_algorithm", "sha256") != "sha256"
+        ):
+            raise ValueError("native profile requires 128-token blocks and sha256")
+        if "host_version_range" in fingerprint_values:
+            raise ValueError("native profile pins the host; omit host_version_range")
+        event_codec = NativeKvEventCodec()
     fingerprint_config = VllmHustFingerprintConfig(
         tokenizer=_required_string(fingerprint_values, "tokenizer"),
         hash_block_size=block_size,
-        hash_algorithm=fingerprint_values.get("hash_algorithm", "sha256"),
+        hash_algorithm=fingerprint_values.get(
+            "hash_algorithm", "xxhash" if profile == "pr2-enhanced" else "sha256"
+        ),
         host_version_range=fingerprint_values.get(
-            "host_version_range", ">=0.25.1,<0.30"
+            "host_version_range",
+            native_host_range
+            if native
+            else (">=0.23.1,<0.24" if profile == "pr2-enhanced" else ">=0.25.1,<0.30"),
         ),
         tokenizer_revision=fingerprint_values.get("tokenizer_revision"),
         trust_remote_code=fingerprint_values.get("trust_remote_code", False),
@@ -118,25 +177,25 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
     default_backend = raw.get("default_backend", backends[0].node_id)
     if not isinstance(default_backend, str):
         raise ValueError("default_backend must be a string")
-    event_codec = VllmHustKvEventCodec(fingerprint_config.host_version_range)
-    allow_unversioned = raw.get("allow_unversioned_replay", False)
-    if not isinstance(allow_unversioned, bool):
-        raise ValueError("allow_unversioned_replay must be a boolean")
-    if not event_codec.snapshot_replay and not allow_unversioned:
-        raise ValueError(
-            "the host has no snapshot/epoch replay; set "
-            "allow_unversioned_replay=true only for best-effort deployments"
-        )
-    for backend in backends:
-        if not event_codec.snapshot_replay and not backend.group_block_sizes:
+    if not native:
+        event_codec = VllmHustKvEventCodec(fingerprint_config.host_version_range)
+        if not event_codec.snapshot_replay and not allow_unversioned:
             raise ValueError(
-                f"backend {backend.node_id!r} requires group_block_sizes "
-                "without cache snapshots"
+                "the host has no snapshot/epoch replay; set "
+                "allow_unversioned_replay=true only for best-effort deployments"
             )
-        if not event_codec.snapshot_replay and backend.data_parallel_rank is None:
+    for backend in backends:
+        if native and backend.group_block_sizes not in ({}, {0: 128}):
             raise ValueError(
-                f"backend {backend.node_id!r} requires data_parallel_rank "
-                "without cache snapshots"
+                "managed native profile supports only KV group 0 of size 128"
+            )
+        if (
+            not native
+            and not event_codec.snapshot_replay
+            and (not backend.group_block_sizes or backend.data_parallel_rank is None)
+        ):
+            raise ValueError(
+                "unversioned replay requires group_block_sizes and data_parallel_rank"
             )
         prefix_index.register_node(
             backend.node_id,
@@ -144,8 +203,43 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
             data_parallel_rank=backend.data_parallel_rank,
             group_block_sizes=backend.group_block_sizes or {0: block_size},
         )
+    native_values = _mapping(raw.get("native_replay", {}), "native_replay")
+    timing_keys = {
+        "timeout_s",
+        "interval_s",
+        "view_ttl_s",
+        "max_batches",
+        "max_bytes",
+        "observe_replay",
+    }
+    if native_values.keys() - timing_keys:
+        raise ValueError("unsupported native_replay keys")
     event_sources = []
     for backend in backends:
+        if native:
+            if backend.managed_lease_path is None or backend.data_parallel_rank != 0:
+                raise ValueError(
+                    "native backend requires a managed lease and explicit rank 0"
+                )
+            event_sources.append(
+                NativeReplaySubscriber(
+                    NativeReplayConfig(
+                        node_id=backend.node_id,
+                        url=backend.url,
+                        lease_path=Path(backend.managed_lease_path),
+                        model=fingerprint_config.tokenizer,
+                        hash_block_size=block_size,
+                        identity_digest=model_identity(fingerprint_config.tokenizer),
+                        reply_delimiter=profile == "managed-hust-cedb477-v1",
+                        **native_values,
+                    ),
+                    index=prefix_index,
+                    codec=event_codec,
+                )
+            )
+            continue
+        if backend.managed_lease_path is not None:
+            raise ValueError("managed lease requires the native runtime profile")
         if backend.event_endpoint is None or backend.replay_endpoint is None:
             raise ValueError(
                 f"backend {backend.node_id!r} requires event and replay endpoints"
@@ -168,6 +262,8 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
             backends=backends,
             default_backend=default_backend,
             max_request_body_size=raw.get("max_request_body_size", 16 * 1024 * 1024),
+            require_trusted_cache_view=raw.get("require_trusted_cache_view", False),
+            observe_request_timings=raw.get("observe_request_timings", False),
         ),
         planner=planner,
         fingerprinter=fingerprinter,
@@ -188,6 +284,7 @@ def _backend(raw: Any) -> BackendConfig:
         "group_block_sizes",
         "headers_from_env",
         "pool",
+        "managed_lease_path",
     }
     unknown = value.keys() - allowed
     if unknown:
@@ -228,6 +325,7 @@ def _backend(raw: Any) -> BackendConfig:
         group_block_sizes=group_block_sizes,
         headers=headers,
         pool=BackendPoolConfig(**pool_values),
+        managed_lease_path=value.get("managed_lease_path"),
     )
 
 
