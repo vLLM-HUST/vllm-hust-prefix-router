@@ -1,0 +1,83 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -e ".[dev]"
+      - run: >-
+          python -m pip install
+          "vllm-hust-ext @ git+https://github.com/vLLM-HUST/extension-manager.git@a78c9681ee428589dc7666c0c159cb24c3f0c58a"
+      - run: python -m ruff check .
+      - run: python -m ruff format --check .
+      - run: python -m pytest -q
+      - name: Verify tag matches package version
+        shell: bash
+        run: |
+          version=$(python -c 'from vllm_hust_prefix_router import __version__; print(__version__)')
+          test "$GITHUB_REF_NAME" = "v$version"
+      - run: python -m build --wheel --outdir build-dist
+      - name: Compile a source-free CPython wheel
+        shell: bash
+        run: python scripts/build_protected_wheel.py build-dist/*.whl dist
+      - name: Install the release wheel in a clean environment
+        shell: bash
+        run: |
+          python -m venv .release-smoke
+          .release-smoke/bin/python -m pip install dist/*.whl
+          .release-smoke/bin/python -c 'import vllm_hust_prefix_router.provider'
+          .release-smoke/bin/vllm-hust-prefix-router --help >/dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.python }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    if: github.repository == 'vLLM-HUST/vllm-hust-prefix-router'
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+      - name: Reject sources and incomplete wheel sets
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          files = sorted(Path("dist").iterdir())
+          expected = {f"cp{minor}-none-any" for minor in range(310, 315)}
+          actual = set()
+          for path in files:
+              if path.suffix != ".whl":
+                  raise SystemExit(f"unexpected release file: {path}")
+              actual.add("-".join(path.stem.rsplit("-", 3)[1:]))
+              with ZipFile(path) as archive:
+                  if any(name.endswith((".py", ".pyi")) for name in archive.namelist()):
+                      raise SystemExit(f"source file found in {path}")
+          if actual != expected or len(files) != len(expected):
+              raise SystemExit(f"incomplete CPython wheel set: {actual}")
+          PY
+      - uses: pypa/gh-action-pypi-publish@release/v1

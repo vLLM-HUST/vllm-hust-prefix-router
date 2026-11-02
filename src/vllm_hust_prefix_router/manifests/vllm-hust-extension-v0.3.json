@@ -1,12 +1,12 @@
 {
-  "schema_version": "0.3-experimental",
+  "schema_version": "0.3",
   "extension_id": "org.vllm-hust.prefix-router",
-  "extension_version": "0.1.0.dev0",
+  "extension_version": "0.1.0a1",
   "kind": "control_plane_extension",
   "host": {
-    "provider": "production-stack",
+    "provider": "prefix-router",
     "name": "vllm-hust-prefix-router",
-    "version_range": "==0.1.0.dev0"
+    "version_range": "==0.1.0a1"
   },
   "runtime": {
     "type": "external_service",
@@ -29,7 +29,7 @@
       "type": "python_module",
       "module": "vllm_hust_prefix_router.cli",
       "object": "main",
-      "status": "import_only"
+      "status": "active"
     }
   ],
   "requires_services": [

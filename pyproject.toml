@@ -46,6 +46,9 @@ Issues = "https://github.com/vLLM-HUST/vllm-hust-prefix-router/issues"
 [project.entry-points."vllm_hust.extension_bundles"]
 "org.vllm-hust.prefix-router" = "vllm_hust_prefix_router.manifests"
 
+[project.entry-points."vllm_hust_ext.providers"]
+prefix-router = "vllm_hust_prefix_router.provider:PrefixRouterProvider"
+
 [tool.setuptools.dynamic]
 version = {attr = "vllm_hust_prefix_router._version.__version__"}
 
