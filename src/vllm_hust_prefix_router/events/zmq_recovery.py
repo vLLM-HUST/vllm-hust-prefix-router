@@ -93,6 +93,7 @@ class ZmqEventSubscriber:
     def status(self) -> dict[str, object]:
         """Return health and sequence state for readiness evidence."""
         return {
+            "node_id": self.config.node_id,
             "ready": self.ready,
             "last_error": self.last_error,
             "publisher_epoch": self._recovery.state.publisher_epoch,

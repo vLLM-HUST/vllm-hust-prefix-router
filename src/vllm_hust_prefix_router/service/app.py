@@ -11,6 +11,7 @@ from typing import Any, Protocol
 
 from aiohttp import ClientError, web
 
+from vllm_hust_prefix_router._version import __version__
 from vllm_hust_prefix_router.config import BackendConfig
 from vllm_hust_prefix_router.core.lifecycle import RequestLifecycleObserver
 from vllm_hust_prefix_router.core.planner import RoutePlanner
@@ -84,11 +85,13 @@ class RouterService:
         planner: RoutePlanner,
         fingerprinter: RequestFingerprinter,
         event_sources: tuple[EventSource, ...] = (),
+        config_sha256: str | None = None,
     ) -> None:
         self.config = config
         self.planner = planner
         self.fingerprinter = fingerprinter
         self.event_sources = event_sources
+        self.config_sha256 = config_sha256
         self.pools = BackendPoolRegistry(list(config.backends))
         self._backends = {backend.node_id: backend for backend in config.backends}
         self._fingerprint_fallbacks = 0
@@ -263,7 +266,14 @@ def create_app(service: RouterService) -> web.Application:
     app = web.Application(client_max_size=service.config.max_request_body_size)
 
     async def health(_: web.Request) -> web.Response:
-        return web.json_response({"status": "ok"})
+        return web.json_response(
+            {
+                "status": "ok",
+                "extension_id": "org.vllm-hust.prefix-router",
+                "version": __version__,
+                "config_sha256": service.config_sha256,
+            }
+        )
 
     async def ready(_: web.Request) -> web.Response:
         status = 200 if service.ready() else 503

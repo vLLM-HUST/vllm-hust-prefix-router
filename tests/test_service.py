@@ -7,6 +7,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from vllm_hust_prefix_router._version import __version__
 from vllm_hust_prefix_router.config import BackendConfig, BackendPoolConfig
 from vllm_hust_prefix_router.core.lifecycle import LifecycleLoadTracker
 from vllm_hust_prefix_router.core.planner import RoutePlanner
@@ -84,6 +85,13 @@ async def test_all_nodes_use_the_same_remote_streaming_path() -> None:
     client = TestClient(TestServer(create_app(service)))
     await client.start_server()
     try:
+        health_response = await client.get("/healthz")
+        assert await health_response.json() == {
+            "status": "ok",
+            "extension_id": "org.vllm-hust.prefix-router",
+            "version": __version__,
+            "config_sha256": None,
+        }
         selected = []
         for _ in range(4):
             response = await client.post(
