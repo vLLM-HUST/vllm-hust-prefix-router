@@ -120,11 +120,22 @@ class NodePrefixCacheState:
             elif isinstance(event, AllBlocksCleared):
                 self.group_hashes.clear()
 
-    def invalidate(self, *, clear: bool = False) -> None:
-        """Suspend prefix claims, optionally discarding the previous generation."""
+    def invalidate(self, *, clear: bool = True) -> None:
+        """Revoke trust, optionally retaining a base for contiguous replay."""
         if clear:
             self.group_hashes.clear()
         self.trusted = False
+
+    def _copy_for_recovery(self) -> "NodePrefixCacheState":
+        """Isolate mutable containers while sharing immutable block-hash bytes."""
+        return replace(
+            self,
+            group_block_sizes=dict(self.group_block_sizes),
+            group_hashes=defaultdict(
+                set,
+                {group: set(hashes) for group, hashes in self.group_hashes.items()},
+            ),
+        )
 
     def longest_prefix_match(
         self,
@@ -262,6 +273,11 @@ class GlobalPrefixIndex:
             node_id=node_id,
             hash_block_size=previous.hash_block_size,
             data_parallel_rank=previous.data_parallel_rank,
+            group_block_sizes={
+                event.group_idx: event.block_size
+                for event in batch.events
+                if isinstance(event, BlockStored)
+            },
         )
         replacement.apply_events(batch.events)
         replacement.trusted = False
@@ -272,7 +288,7 @@ class GlobalPrefixIndex:
         node_id: str,
         data_parallel_rank: int | None = None,
         *,
-        clear: bool = False,
+        clear: bool = True,
     ) -> None:
         """Invalidate prefix claims after an event gap or publisher restart."""
         matched = False
@@ -284,6 +300,51 @@ class GlobalPrefixIndex:
                 matched = True
         if not matched:
             self._state_for_events(node_id, data_parallel_rank).invalidate(clear=clear)
+
+    def apply_recovery_batches(
+        self,
+        node_id: str,
+        batches: Sequence[CacheEventBatch],
+        *,
+        data_parallel_rank: int | None,
+        replace_cache: bool,
+        replace_layout: bool = False,
+    ) -> None:
+        """Stage replay changes before publishing a trusted view.
+
+        Only this backend's states are copied. This method is synchronous: callers
+        must serialize recovery with live updates on their event loop.
+        """
+        if replace_layout and (not replace_cache or len(batches) != 1):
+            raise ValueError("layout replacement requires one complete snapshot")
+        if not batches and not replace_cache:
+            # An unchanged watermark should not copy every cached block at each poll.
+            for (candidate, rank), state in self._nodes.items():
+                if candidate == node_id and (
+                    data_parallel_rank is None or rank == data_parallel_rank
+                ):
+                    state.trusted = True
+            return
+        staged = GlobalPrefixIndex()
+        staged._node_defaults = self._node_defaults.copy()
+        staged._nodes = {
+            key: state._copy_for_recovery() if key[0] == node_id else state
+            for key, state in self._nodes.items()
+        }
+        if replace_cache:
+            staged.invalidate_node(node_id, data_parallel_rank)
+        if replace_layout:
+            staged.replace_from_event_snapshot(node_id, batches[0])
+        else:
+            for batch in batches:
+                staged.apply_event_batch(node_id, batch)
+        # Do not create an unranked placeholder when a batch supplied its rank.
+        for (candidate, rank), state in staged._nodes.items():
+            if candidate == node_id and (
+                data_parallel_rank is None or rank == data_parallel_rank
+            ):
+                state.trusted = True
+        self._nodes = staged._nodes
 
     def trust_node(self, node_id: str, data_parallel_rank: int | None = None) -> None:
         """Mark a recovered node state usable for prefix matching."""

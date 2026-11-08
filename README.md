@@ -41,11 +41,11 @@ prompt blocks. An active-request term is configurable but disabled by default
 (`active_request_weight=0`). These weights are not latency-calibrated; compare
 policies on the target model before making performance claims.
 
-## Current vLLM-HUST main and TP2
+## Public host contract and TP2
 
 The default host-version range is `>=0.25.1,<0.30`. The Router detects whether
-the host exports snapshot/epoch replay structs. The current 0.29.1 source uses
-an unversioned, sequence-frame replay stream instead. The Router can read
+the host exports snapshot/epoch replay structs. The 0.29.1 source described by
+PR #4 uses an unversioned, sequence-frame replay stream instead. The Router can read
 that stream and build a conservative partial cache index, but it cannot prove
 publisher identity across restarts or reconstruct events lost outside the
 bounded replay buffer. For this reason it refuses unversioned replay by default.
@@ -135,3 +135,19 @@ to launch while the configured Router, KV subscriptions, or any required
 backend is unhealthy. The Manager's `runtime_effective` state still requires
 separate owning-process request evidence; health alone does not establish it.
 
+## Reliability slice (unreleased)
+
+This increment retains the public Router and adds atomic recovery, managed
+incarnation/attempt isolation, bounded receipts and cancellation cleanup.
+Unknown host interfaces fail closed; no inference-engine patch is required.
+It does not provide an atomic engine pre-reuse fence or KV-byte transfer fencing.
+
+- [Scope, interface ownership and compatibility](docs/reliability.md)
+- [CPU qualification, operator lifecycle and rollback](docs/reliability-delivery.md)
+- [Evidence summary and exclusions](docs/reliability-evidence.md)
+
+The Manager provider is active, but the user still owns the external service:
+`enable` records intent and managed launch remains fail-closed until configured
+health checks pass. Optional `observe_request_timings` defaults to false and does
+not control admission. Protect `/metrics` on a private interface or at the
+deployment edge: its bounded diagnostic receipts are not a durable audit log.

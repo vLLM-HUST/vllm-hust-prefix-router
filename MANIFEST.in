@@ -1,6 +1,10 @@
 include CHANGELOG.md
 include PROVENANCE.md
+recursive-include tests *.py
 recursive-include examples *.json
 recursive-include docs *.md
 recursive-include scripts *.sh
+include scripts/check_delivery_manager.py
+include scripts/write_managed_lease.py
+include experiments/verify_host_kv_wire.py
 recursive-include experiments *.py *.md

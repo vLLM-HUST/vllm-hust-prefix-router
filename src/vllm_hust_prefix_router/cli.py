@@ -28,5 +28,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from vllm_hust_prefix_router.service.config_loader import load_runtime_config
 
         runtime = load_runtime_config(args.config)
-        web.run_app(create_app(runtime.service), host=runtime.host, port=runtime.port)
+        web.run_app(
+            create_app(runtime.service),
+            host=runtime.host,
+            port=runtime.port,
+            handler_cancellation=True,
+        )
     return 0

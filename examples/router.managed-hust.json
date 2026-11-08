@@ -1,0 +1,47 @@
+{
+  "runtime_profile": "managed-hust-cedb477-v1",
+  "listen": {"host": "127.0.0.1", "port": 8000},
+  "policy": "lifecycle",
+  "hash_block_size": 128,
+  "default_backend": "node0",
+  "require_trusted_cache_view": true,
+  "observe_request_timings": false,
+  "fingerprint": {
+    "tokenizer": "/data/shared_models/Qwen2.5-14B-Instruct",
+    "hash_algorithm": "sha256",
+    "trust_remote_code": false
+  },
+  "native_replay": {"timeout_s": 1, "interval_s": 0.2, "view_ttl_s": 2},
+  "backends": [
+    {
+      "id": "node0",
+      "url": "http://127.0.0.1:8100",
+      "data_parallel_rank": 0,
+      "event_endpoint": "tcp://127.0.0.1:5557",
+      "replay_endpoint": "tcp://127.0.0.1:5558",
+      "managed_lease_path": "/absolute/private-incarnation/node0.lease.json",
+      "pool": {
+        "max_connections": 8,
+        "max_pending_requests": 16,
+        "queue_timeout_s": 10,
+        "request_timeout_s": 60,
+        "keepalive_timeout_s": 2
+      }
+    },
+    {
+      "id": "node1",
+      "url": "http://127.0.0.1:8101",
+      "data_parallel_rank": 0,
+      "event_endpoint": "tcp://127.0.0.1:5567",
+      "replay_endpoint": "tcp://127.0.0.1:5568",
+      "managed_lease_path": "/absolute/private-incarnation/node1.lease.json",
+      "pool": {
+        "max_connections": 8,
+        "max_pending_requests": 16,
+        "queue_timeout_s": 10,
+        "request_timeout_s": 60,
+        "keepalive_timeout_s": 2
+      }
+    }
+  ]
+}

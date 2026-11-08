@@ -62,39 +62,11 @@ class VllmHustKvEventCodec:
     def decode_batch(self, payload: bytes) -> CacheEventBatch:
         """Decode and normalize one host event batch."""
         batch = self._batch_decoder.decode(payload)
-        events = []
-        for event in batch.events:
-            if isinstance(event, self._host_cleared):
-                events.append(AllBlocksCleared())
-                continue
-            if isinstance(event, self._host_stored):
-                group_idx = 0 if event.group_idx is None else event.group_idx
-                events.append(
-                    BlockStored(
-                        tuple(
-                            normalize_external_block_hash(value)
-                            for value in event.block_hashes
-                        ),
-                        block_size=event.block_size,
-                        group_idx=group_idx,
-                    )
-                )
-            elif isinstance(event, self._host_removed):
-                group_idx = 0 if event.group_idx is None else event.group_idx
-                events.append(
-                    BlockRemoved(
-                        tuple(
-                            normalize_external_block_hash(value)
-                            for value in event.block_hashes
-                        ),
-                        group_idx=group_idx,
-                    )
-                )
-            else:
-                raise TypeError(f"unsupported KV event {type(event).__name__}")
-        return CacheEventBatch(
-            events=tuple(events),
-            data_parallel_rank=batch.data_parallel_rank,
+        return decode_host_batch(
+            batch,
+            stored=self._host_stored,
+            removed=self._host_removed,
+            cleared=self._host_cleared,
         )
 
     def encode_replay_request(
@@ -125,3 +97,33 @@ class VllmHustKvEventCodec:
             replayed_batches=tuple(response.replayed_batches),
             snapshot=response.snapshot,
         )
+
+
+def decode_host_batch(
+    batch: Any, *, stored: type, removed: type, cleared: type
+) -> CacheEventBatch:
+    """Normalize the common KV batch schema; transport profiles remain distinct."""
+    events = []
+    for event in batch.events:
+        if isinstance(event, cleared):
+            events.append(AllBlocksCleared())
+        elif isinstance(event, stored):
+            if event.block_size <= 0:
+                raise ValueError("native cache block size must be positive")
+            events.append(
+                BlockStored(
+                    tuple(normalize_external_block_hash(v) for v in event.block_hashes),
+                    block_size=event.block_size,
+                    group_idx=0 if event.group_idx is None else event.group_idx,
+                )
+            )
+        elif isinstance(event, removed):
+            events.append(
+                BlockRemoved(
+                    tuple(normalize_external_block_hash(v) for v in event.block_hashes),
+                    group_idx=0 if event.group_idx is None else event.group_idx,
+                )
+            )
+        else:
+            raise TypeError(f"unsupported KV event {type(event).__name__}")
+    return CacheEventBatch(tuple(events), batch.data_parallel_rank)

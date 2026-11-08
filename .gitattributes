@@ -1,0 +1,11 @@
+* text=auto eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+*.sh text eol=lf
+# Evidence bytes must never be normalized if later checked into the repository.
+*.log -text
+*.jsonl -text
+runs/** -text
+docs/evidence/** -text
