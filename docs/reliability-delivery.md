@@ -80,7 +80,7 @@ Install it into a **new empty** target with the frozen host Python:
 ```bash
 /absolute/host-env/bin/python -m pip install --no-deps \
   --target /absolute/new-router-target \
-  /absolute/vllm_hust_prefix_router-0.1.0.dev0-py3-none-any.whl
+  /absolute/vllm_hust_prefix_router-0.1.0a1-py3-none-any.whl
 ```
 
 Do not overwrite a live target, upgrade serving

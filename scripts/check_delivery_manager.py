@@ -28,6 +28,8 @@ def main():
     # An engine installation is never an eligible disposable wheel environment.
     from importlib.metadata import PackageNotFoundError, version
 
+    distribution_version = version(DISTRIBUTION)
+
     for package in ("vllm", "vllm-ascend", "torch", "torch-npu"):
         try:
             version(package)
@@ -75,14 +77,23 @@ def main():
             contains="NATIVE_BYPASS_OK",
         )
 
-    run("list", [cli, "extension", "list"], contains=f"{EXTENSION} 0.1.0.dev0 disabled")
+    run(
+        "list",
+        [cli, "extension", "list"],
+        contains=f"{EXTENSION} {distribution_version} disabled",
+    )
     extension("inspect", contains="vllm.request-routing.front-door")
     extension("validate")
-    extension("check", contains="descriptor-only")
-    extension("plan", contains='"operation": "inspect_only"')
-    extension("render", contains="inspect_only")
-    extension("enable", expected=2, contains="implementation status: import_only")
-    native("native-disabled")
+    extension("check", contains="Router configuration is not bound")
+    extension("plan", contains='"operation": "check_external_router"')
+    extension("render", contains="prefix-router-operator-plan.json")
+    extension("enable", contains="enabled")
+    run(
+        "managed-run-fails-closed",
+        [cli, "run", "--dry-run", "--", sys.executable, "-c", probe],
+        expected=2,
+        contains="required service health is not verified",
+    )
     extension("disable", contains="disabled")
     run("disable-again", [cli, "extension", "disable", EXTENSION], contains="disabled")
     native("native-after-disable")
