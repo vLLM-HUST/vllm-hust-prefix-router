@@ -55,13 +55,41 @@ jobs:
           cp -a tests "$test_root/tests"
           unset PYTHONPATH PYTHONHOME
           (cd "$test_root" && "$wheel_python" -m pytest -q tests --ignore=tests/test_sharegpt_experiment.py)
-      - name: Pinned Manager discovery, disable, forget and uninstall
+      - name: Verify clean-wheel ECPA posture
         if: matrix.python == '3.12'
         shell: bash
         run: |
           set -euo pipefail
           .wheel-check/bin/python -m pip install \
-            "vllm-hust-ext @ git+https://github.com/vLLM-HUST/extension-manager.git@7bcfe5566146e148de8f6593dc1b8b2e30dbced9"
+            "vllm-hust-ext @ git+https://github.com/vLLM-HUST/extension-manager.git@a78c9681ee428589dc7666c0c159cb24c3f0c58a"
+          export XDG_CONFIG_HOME="$PWD/.ecpa-state/config"
+          export XDG_STATE_HOME="$PWD/.ecpa-state/state"
+          export XDG_CACHE_HOME="$PWD/.ecpa-state/cache"
+          cli=.wheel-check/bin/vllm-hust-ext
+          "$cli" extension list \
+            | grep 'org.vllm-hust.prefix-router 0.1.0a1 disabled'
+          "$cli" extension inspect org.vllm-hust.prefix-router \
+            | grep 'vllm.request-routing.front-door'
+          "$cli" extension validate org.vllm-hust.prefix-router \
+            | grep '"activation_ready": true'
+          "$cli" extension check org.vllm-hust.prefix-router \
+            | grep 'Router configuration is not bound'
+          "$cli" extension plan org.vllm-hust.prefix-router \
+            | grep '"operation": "check_external_router"'
+          "$cli" extension render org.vllm-hust.prefix-router \
+            | grep 'prefix-router-operator-plan.json'
+          "$cli" extension enable org.vllm-hust.prefix-router
+          if "$cli" run --dry-run -- python -c pass; then
+            echo 'unverified external services were unexpectedly accepted' >&2
+            exit 1
+          fi
+          "$cli" extension disable org.vllm-hust.prefix-router
+          "$cli" extension forget org.vllm-hust.prefix-router
+          "$cli" run --dry-run -- python -c pass >.ecpa-run.json
+          if grep -q 'PREFIX_ROUTER' .ecpa-run.json; then
+            echo 'disabled service unexpectedly changed the native path' >&2
+            exit 1
+          fi
           .wheel-check/bin/python scripts/check_delivery_manager.py \
             --output "$RUNNER_TEMP/router-manager-delivery" \
             --uninstall-from-disposable-venv

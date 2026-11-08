@@ -1,7 +1,7 @@
 import json
 import subprocess
 import sys
-from importlib import resources
+from importlib import metadata, resources
 
 from vllm_hust_prefix_router import __version__
 
@@ -13,12 +13,13 @@ def test_manifest_version_matches_distribution_version() -> None:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     assert manifest["extension_id"] == "org.vllm-hust.prefix-router"
-    assert manifest["schema_version"] == "0.3-experimental"
+    assert manifest["schema_version"] == "0.3"
     assert manifest["extension_version"] == __version__
     assert manifest["kind"] == "control_plane_extension"
     assert manifest["runtime"]["type"] == "external_service"
+    assert manifest["host"]["provider"] == "prefix-router"
     assert manifest["lifecycle_owner"] == "user"
-    assert manifest["implementation"][0]["status"] == "import_only"
+    assert manifest["implementation"][0]["status"] == "active"
     assert manifest["requires_extensions"] == []
     assert [service["service_id"] for service in manifest["requires_services"]] == [
         "vllm-openai-backends",
@@ -31,6 +32,13 @@ def test_manifest_version_matches_distribution_version() -> None:
             "mode": "exclusive",
         }
     ]
+
+    provider = next(
+        entry
+        for entry in metadata.distribution("vllm-hust-prefix-router").entry_points
+        if entry.group == "vllm_hust_ext.providers" and entry.name == "prefix-router"
+    )
+    assert provider.value == "vllm_hust_prefix_router.provider:PrefixRouterProvider"
 
 
 def test_package_import_does_not_import_runtime_dependencies() -> None:

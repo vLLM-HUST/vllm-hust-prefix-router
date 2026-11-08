@@ -3,14 +3,17 @@
 Owner-maintained extraction of the prefix-aware routing work developed in
 vLLM-HUST.
 
-**Status: active pre-release migration. The current development wheel is
-installable and discoverable, but its manifest remains `import_only` until the
-external service passes end-to-end acceptance.**
+**Status: `0.1.0a1` release candidate. The manifest has an active external
+carrier and an Extension Manager host provider. Manager enablement records
+intent; live service checks gate a managed launch. Real Qwen3.5 TP2/NPU
+acceptance and performance qualification remain outstanding.**
 
 The Manifest 0.3 descriptor names the required OpenAI backend and KV-event
-service sets and claims the deployment routing front door exclusively. These
-are composition metadata only: ECPA does not start, stop, configure, or health-
-check this user-owned process while the carrier is `import_only`.
+service sets and claims the deployment routing front door exclusively. The
+`prefix-router` provider binds those claims to the Router configuration and
+checks the running Router, reconciled KV subscriptions, and backend health.
+The operator still owns starting, stopping, upgrading, and rolling back the
+external service. See [Manager activation](https://github.com/vLLM-HUST/vllm-hust-prefix-router/blob/main/docs/extension-manager.md).
 
 The target is a control-plane router extension plus a narrow vLLM cache-event
 adapter. The global router will not be presented as an in-process scheduler
@@ -120,16 +123,17 @@ uv run ruff check .
 uv build --no-sources --out-dir dist
 ```
 
-No package version has been published. Do not treat installation or Extension
-Manager discovery as service activation.
+Development builds contain readable Python sources and must not be uploaded to
+PyPI. The release workflow creates and verifies bytecode-only wheels.
 
-Current ECPA integration supports inert `list`, `inspect`,
-`validate`, `check`, `plan`, and `render`, with disable/forget/uninstall
-regression checks. `enable` must fail closed; the
-operator starts and stops the service explicitly with the command above. A
-future active provider must bind the manifest's `backend_endpoints` and
-`kv_event_endpoints` configuration keys to real health evidence before launch
-intent can be accepted.
+See [PyPI release instructions](https://github.com/vLLM-HUST/vllm-hust-prefix-router/blob/main/docs/release.md) for organization ownership,
+trusted publishing, and release verification. Installation alone never starts
+the Router or proves that it handled traffic.
+
+`enable` records intent without starting the Router. A managed `run` refuses
+to launch while the configured Router, KV subscriptions, or any required
+backend is unhealthy. The Manager's `runtime_effective` state still requires
+separate owning-process request evidence; health alone does not establish it.
 
 ## Reliability slice (unreleased)
 
@@ -142,7 +146,8 @@ It does not provide an atomic engine pre-reuse fence or KV-byte transfer fencing
 - [CPU qualification, operator lifecycle and rollback](docs/reliability-delivery.md)
 - [Evidence summary and exclusions](docs/reliability-evidence.md)
 
-Manager activation remains intentionally blocked (`import_only`); the user owns
-the external service. Optional `observe_request_timings` defaults to false and
-does not control admission. Protect `/metrics` on a private interface or at the
+The Manager provider is active, but the user still owns the external service:
+`enable` records intent and managed launch remains fail-closed until configured
+health checks pass. Optional `observe_request_timings` defaults to false and does
+not control admission. Protect `/metrics` on a private interface or at the
 deployment edge: its bounded diagnostic receipts are not a durable audit log.

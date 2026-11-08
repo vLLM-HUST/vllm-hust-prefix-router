@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -44,7 +45,8 @@ class RuntimeConfig:
 
 def load_runtime_config(path: str | Path) -> RuntimeConfig:
     """Load a JSON object and construct a fail-closed Router runtime."""
-    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    config_bytes = Path(path).read_bytes()
+    raw = json.loads(config_bytes)
     if not isinstance(raw, dict):
         raise ValueError("Router configuration must be a JSON object")
     allowed = {
@@ -268,6 +270,7 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
         planner=planner,
         fingerprinter=fingerprinter,
         event_sources=tuple(event_sources),
+        config_sha256=hashlib.sha256(config_bytes).hexdigest(),
     )
     return RuntimeConfig(service=service, host=host, port=port)
 
