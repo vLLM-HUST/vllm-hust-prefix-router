@@ -24,6 +24,8 @@ class LifecycleRoutingConfig:
     selection_temperature: float = 0.0
     track_output_blocks: bool = False
     request_expiry_s: float = 300.0
+    active_decode_sequence_weight: float = 0.0
+    router_queue_weight: float = 0.0
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -32,6 +34,8 @@ class LifecycleRoutingConfig:
             ("decode_block_weight", self.decode_block_weight),
             ("selection_temperature", self.selection_temperature),
             ("request_expiry_s", self.request_expiry_s),
+            ("active_decode_sequence_weight", self.active_decode_sequence_weight),
+            ("router_queue_weight", self.router_queue_weight),
         ):
             if (
                 not isinstance(value, int | float)
@@ -79,6 +83,7 @@ class RequestLoad:
     block_keys: tuple[bytes, ...]
     cache_size_blocks: int = 0
     prompt_loads: tuple[PromptLoad, ...] = ()
+    router_queue_requests: int = 0
 
     def __post_init__(self) -> None:
         if not self.node_id:
@@ -119,6 +124,12 @@ class RequestLoad:
             )
             if flattened_keys != self.block_keys:
                 raise ValueError("prompt_loads block keys do not match block_keys")
+        if (
+            not isinstance(self.router_queue_requests, int)
+            or isinstance(self.router_queue_requests, bool)
+            or self.router_queue_requests < 0
+        ):
+            raise ValueError("router_queue_requests must be a non-negative integer")
 
     @property
     def worker(self) -> WorkerKey:
@@ -155,6 +166,10 @@ class CandidateLoadScore:
     active_requests: int
     active_request_cost: float
     cost: float
+    active_decode_sequences: int = 0
+    active_decode_sequence_cost: float = 0.0
+    router_queue_requests: int = 0
+    router_queue_cost: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -178,6 +193,7 @@ class WorkerLoadView:
     tracked_requests: int
     pending_requests: int
     accepted_requests: int
+    active_decode_sequences: int = 0
 
 
 @dataclass
@@ -192,6 +208,8 @@ class _TrackedRequest:
     dispatched: bool
     accepted: bool
     last_touched_s: float
+    decoding_sequences: set[tuple[int, int]]
+    finished_sequences: set[tuple[int, int]]
 
 
 class LifecycleLoadTracker:
@@ -253,6 +271,8 @@ class LifecycleLoadTracker:
                 dispatched=False,
                 accepted=False,
                 last_touched_s=now_s,
+                decoding_sequences=set(),
+                finished_sequences=set(),
             )
             self._acquire_locked(request_id, selected.load)
             return LifecycleSelection(selected=selected, candidates=scores)
@@ -304,6 +324,56 @@ class LifecycleLoadTracker:
             request.last_touched_s = self._clock()
             return True
 
+    def mark_decode_started(
+        self, request_id: str, prompt_index: int, choice_index: int = 0
+    ) -> bool:
+        """Count a sequence only after observing actual generated output."""
+        self._validate_sequence_indices(prompt_index, choice_index)
+        with self._lock:
+            request = self._requests.get(request_id)
+            if request is None or prompt_index in request.released_prompts:
+                return False
+            if prompt_index >= len(request.candidates[request.worker].prompts):
+                return False
+            sequence = prompt_index, choice_index
+            if (
+                sequence in request.decoding_sequences
+                or sequence in request.finished_sequences
+            ):
+                return False
+            request.prefill_completed.add(prompt_index)
+            request.decoding_sequences.add(sequence)
+            request.last_touched_s = self._clock()
+            return True
+
+    def mark_decode_finished(
+        self, request_id: str, prompt_index: int, choice_index: int = 0
+    ) -> bool:
+        """Stop counting one choice while sibling choices may keep decoding."""
+        self._validate_sequence_indices(prompt_index, choice_index)
+        with self._lock:
+            request = self._requests.get(request_id)
+            if request is None or prompt_index in request.released_prompts:
+                return False
+            if prompt_index >= len(request.candidates[request.worker].prompts):
+                return False
+            sequence = prompt_index, choice_index
+            if sequence in request.finished_sequences:
+                return False
+            request.decoding_sequences.discard(sequence)
+            request.finished_sequences.add(sequence)
+            request.last_touched_s = self._clock()
+            return True
+
+    @staticmethod
+    def _validate_sequence_indices(prompt_index: int, choice_index: int) -> None:
+        for name, value in (
+            ("prompt_index", prompt_index),
+            ("choice_index", choice_index),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+
     def record_output_tokens(
         self,
         request_id: str,
@@ -326,10 +396,14 @@ class LifecycleLoadTracker:
             if not 0 <= prompt_index < len(load.prompts):
                 return False
             sequence_key = prompt_index, choice_index
+            if sequence_key in request.finished_sequences:
+                return False
             previous = request.generated_tokens.get(sequence_key, 0)
             if generated_tokens <= previous:
                 return False
             request.generated_tokens[sequence_key] = generated_tokens
+            request.prefill_completed.add(prompt_index)
+            request.decoding_sequences.add(sequence_key)
             request.last_touched_s = self._clock()
             if not self.config.track_output_blocks:
                 return True
@@ -485,10 +559,18 @@ class LifecycleLoadTracker:
         active_request_cost = self.config.active_request_weight * (
             load.active_requests + candidate.prompt_count
         )
+        active_decode_sequence_cost = (
+            self.config.active_decode_sequence_weight * load.active_decode_sequences
+        )
+        router_queue_cost = (
+            self.config.router_queue_weight * candidate.router_queue_requests
+        )
         cost = (
             self.config.prefill_load_weight * potential_prefill_blocks
             + self.config.decode_block_weight * potential_decode_blocks
             + active_request_cost
+            + active_decode_sequence_cost
+            + router_queue_cost
         )
         return CandidateLoadScore(
             load=candidate,
@@ -501,6 +583,10 @@ class LifecycleLoadTracker:
             active_requests=load.active_requests,
             active_request_cost=active_request_cost,
             cost=cost,
+            active_decode_sequences=load.active_decode_sequences,
+            active_decode_sequence_cost=active_decode_sequence_cost,
+            router_queue_requests=candidate.router_queue_requests,
+            router_queue_cost=router_queue_cost,
         )
 
     def _worker_load_locked(
@@ -560,6 +646,10 @@ class LifecycleLoadTracker:
             tracked_requests=tracked_requests,
             pending_requests=pending_requests,
             accepted_requests=accepted_requests,
+            active_decode_sequences=sum(
+                len(self._requests[request_id].decoding_sequences)
+                for request_id in request_ids
+            ),
         )
 
     def _acquire_locked(self, request_id: str, load: RequestLoad) -> None:
@@ -606,6 +696,12 @@ class LifecycleLoadTracker:
                 self._worker_block_refs.pop(worker, None)
         request.prefill_completed.add(prompt_index)
         request.released_prompts.add(prompt_index)
+        request.decoding_sequences = {
+            key for key in request.decoding_sequences if key[0] != prompt_index
+        }
+        request.finished_sequences = {
+            key for key in request.finished_sequences if key[0] != prompt_index
+        }
 
     @staticmethod
     def _output_block_key(
@@ -763,14 +859,20 @@ class RequestLifecycleObserver:
                 and self.prompt_count == self.choices_per_prompt == 1
             ):
                 choice_index = 0
-            if not isinstance(choice_index, int) or isinstance(choice_index, bool):
+            if (
+                not isinstance(choice_index, int)
+                or isinstance(choice_index, bool)
+                or not 0 <= choice_index < self.prompt_count * self.choices_per_prompt
+                or choice_index in self._finished_choices
+            ):
                 continue
-            prompt_index = min(
-                choice_index // self.choices_per_prompt,
-                self.prompt_count - 1,
-            )
+            prompt_index = choice_index // self.choices_per_prompt
+            local_choice_index = choice_index % self.choices_per_prompt
             if self._choice_has_content(choice):
                 self._mark_prefill_completed(prompt_index)
+                self.tracker.mark_decode_started(
+                    self.request_id, prompt_index, local_choice_index
+                )
             token_ids = choice.get("token_ids")
             if isinstance(token_ids, list) and all(
                 isinstance(token_id, int) and not isinstance(token_id, bool)
@@ -783,10 +885,13 @@ class RequestLifecycleObserver:
                     self.request_id,
                     prompt_index,
                     self._choice_tokens[choice_index],
-                    choice_index % self.choices_per_prompt,
+                    local_choice_index,
                 )
             if choice.get("finish_reason") is not None:
                 self._finished_choices.add(choice_index)
+                self.tracker.mark_decode_finished(
+                    self.request_id, prompt_index, local_choice_index
+                )
                 first_choice = prompt_index * self.choices_per_prompt
                 if all(
                     index in self._finished_choices

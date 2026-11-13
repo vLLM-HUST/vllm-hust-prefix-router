@@ -41,6 +41,13 @@ prompt blocks. An active-request term is configurable but disabled by default
 (`active_request_weight=0`). These weights are not latency-calibrated; compare
 policies on the target model before making performance claims.
 
+Two optional Lifecycle terms charge observed active Decode sequences
+(`active_decode_sequence_weight`) and requests waiting in this Router's
+backend admission queue (`router_queue_weight`). Both default to `0.0` so
+existing configurations retain the original score. See
+[Lifecycle load signals](docs/lifecycle-load-signals.md) for the formula,
+observation limits, and configurations for independent comparisons.
+
 ## Public host contract and TP2
 
 The default host-version range is `>=0.25.1,<0.30`. The Router detects whether

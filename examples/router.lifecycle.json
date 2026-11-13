@@ -16,6 +16,8 @@
   "lifecycle": {
     "prefill_load_weight": 1.0,
     "active_request_weight": 0.0,
+    "active_decode_sequence_weight": 0.0,
+    "router_queue_weight": 0.0,
     "decode_block_weight": 1.0,
     "selection_temperature": 0.0,
     "track_output_blocks": false,
