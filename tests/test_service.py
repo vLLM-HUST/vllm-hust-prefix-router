@@ -9,7 +9,10 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from vllm_hust_prefix_router._version import __version__
 from vllm_hust_prefix_router.config import BackendConfig, BackendPoolConfig
-from vllm_hust_prefix_router.core.lifecycle import LifecycleLoadTracker
+from vllm_hust_prefix_router.core.lifecycle import (
+    LifecycleLoadTracker,
+    LifecycleRoutingConfig,
+)
 from vllm_hust_prefix_router.core.planner import RoutePlanner
 from vllm_hust_prefix_router.core.prefix_index import GlobalPrefixIndex
 from vllm_hust_prefix_router.protocols.request_fingerprint import (
@@ -156,6 +159,7 @@ async def test_lifecycle_reservation_is_released_after_stream_completion() -> No
                     "tracked_requests": 0,
                     "pending_requests": 0,
                     "accepted_requests": 0,
+                    "active_decode_sequences": 0,
                 }
             },
         }
@@ -311,3 +315,158 @@ async def test_cancelled_dispatch_releases_lifecycle_reservation(monkeypatch) ->
     assert tracker.active_request_ids() == ()
     load = tracker.worker_load(("node-0", None))
     assert load.active_requests == load.tracked_requests == 0
+
+
+async def _wait_until(predicate):
+    async def wait():
+        while not predicate():
+            await asyncio.sleep(0.001)
+
+    await asyncio.wait_for(wait(), timeout=3)
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_routes_away_from_a_real_router_admission_queue():
+    upstreams = [await _upstream() for _ in range(2)]
+    index = GlobalPrefixIndex()
+    backends = []
+    for node, (server, _) in enumerate(upstreams):
+        node_id = f"node-{node}"
+        index.register_node(node_id, hash_block_size=16)
+        backends.append(
+            BackendConfig(
+                node_id,
+                str(server.make_url("/")),
+                pool=BackendPoolConfig(max_connections=1, queue_timeout_s=5),
+            )
+        )
+    tracker = LifecycleLoadTracker(
+        block_size=16,
+        config=LifecycleRoutingConfig(router_queue_weight=1),
+        random_sample=lambda: 0,
+    )
+    service = RouterService(
+        RouterServiceConfig(tuple(backends), "node-0"),
+        planner=RoutePlanner(
+            index, policy="lifecycle", block_size=16, lifecycle_tracker=tracker
+        ),
+        fingerprinter=FakeFingerprinter(),
+    )
+    client = TestClient(TestServer(create_app(service)))
+    await client.start_server()
+    busy_pool = service.pools.pool("node-0")
+    waiter = None
+
+    async def wait_for_slot():
+        async with busy_pool._admit():
+            pass
+
+    try:
+        # Occupy a real pool slot and put a second task in its real admission queue.
+        async with busy_pool._admit():
+            waiter = asyncio.create_task(wait_for_slot())
+            await _wait_until(lambda: busy_pool.stats().queued_requests == 1)
+            response = await client.post(
+                "/v1/completions", json={"prompt": "hello", "stream": True}
+            )
+            assert response.headers["x-vllm-hust-router-node"] == "node-1"
+            await response.read()
+            assert [len(received) for _, received in upstreams] == [0, 1]
+            metrics = await (await client.get("/metrics")).json()
+            assert metrics["backends"]["node-0"]["queued_requests"] == 1
+        await waiter
+        assert busy_pool.stats().queued_requests == 0
+        assert tracker.active_request_ids() == ()
+    finally:
+        if waiter is not None:
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
+        await client.close()
+        for server, _ in upstreams:
+            await server.close()
+
+
+@pytest.mark.asyncio
+async def test_live_decode_choices_affect_routing_and_metrics():
+    finish_first = asyncio.Event()
+    finish_all = asyncio.Event()
+
+    async def stream(request):
+        assert (await request.json())["n"] == 2
+        response = web.StreamResponse(headers={"content-type": "text/event-stream"})
+        await response.prepare(request)
+        await response.write(
+            b'data: {"choices":[{"index":0,"text":"a"},{"index":1,"text":"b"}]}\n\n'
+        )
+        await finish_first.wait()
+        await response.write(
+            b'data: {"choices":[{"index":0,"finish_reason":"stop"}]}\n\n'
+        )
+        await finish_all.wait()
+        await response.write(
+            b'data: {"choices":[{"index":1,"finish_reason":"stop"}]}\n\n'
+        )
+        await response.write_eof()
+        return response
+
+    upstream_app = web.Application()
+    upstream_app.router.add_post("/v1/completions", stream)
+    slow = TestServer(upstream_app)
+    await slow.start_server()
+    fast, _ = await _upstream()
+    index = GlobalPrefixIndex()
+    for node in ("node-0", "node-1"):
+        index.register_node(node, hash_block_size=16)
+    tracker = LifecycleLoadTracker(
+        block_size=16,
+        config=LifecycleRoutingConfig(
+            prefill_load_weight=0,
+            decode_block_weight=0,
+            active_decode_sequence_weight=1,
+        ),
+        random_sample=lambda: 0,
+    )
+    service = RouterService(
+        RouterServiceConfig(
+            (
+                BackendConfig("node-0", str(slow.make_url("/"))),
+                BackendConfig("node-1", str(fast.make_url("/"))),
+            ),
+            "node-0",
+        ),
+        planner=RoutePlanner(
+            index, policy="lifecycle", block_size=16, lifecycle_tracker=tracker
+        ),
+        fingerprinter=FakeFingerprinter(),
+    )
+    client = TestClient(TestServer(create_app(service)))
+    await client.start_server()
+    try:
+        first = await client.post(
+            "/v1/completions", json={"prompt": "hello", "stream": True, "n": 2}
+        )
+        assert first.headers["x-vllm-hust-router-node"] == "node-0"
+        await _wait_until(
+            lambda: tracker.worker_load(("node-0", None)).active_decode_sequences == 2
+        )
+        metrics = await (await client.get("/metrics")).json()
+        assert metrics["routing"]["lifecycle"]["node-0"]["active_decode_sequences"] == 2
+        finish_first.set()
+        await _wait_until(
+            lambda: tracker.worker_load(("node-0", None)).active_decode_sequences == 1
+        )
+        second = await client.post(
+            "/v1/completions", json={"prompt": "hello", "stream": True}
+        )
+        assert second.headers["x-vllm-hust-router-node"] == "node-1"
+        await second.read()
+        finish_all.set()
+        await first.read()
+        await _wait_until(lambda: tracker.active_request_ids() == ())
+        assert tracker.worker_load(("node-0", None)).active_decode_sequences == 0
+    finally:
+        finish_first.set()
+        finish_all.set()
+        await client.close()
+        await slow.close()
+        await fast.close()
