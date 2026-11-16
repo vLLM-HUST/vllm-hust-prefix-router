@@ -20,9 +20,8 @@ direction, attribution, and release approval belong to the maintainers above.
 ### Tested versions and release scope
 
 - The historical dual-TP1 comparison used the integrated runtime at `68cf893a` and Ascend at
-  `03a12f9b`, Qwen2.5-7B-Instruct BF16 and two 910B2 devices. Prefix routing increased the cache
-  hit rate from 24.44% to 47.88% and reduced the three-run median of P95 TTFT from 223.80 to
-  174.80 ms, with comparable request throughput.
+  `03a12f9b`, Qwen2.5-7B-Instruct BF16 and two 910B2 devices. The benchmark archive contains the per-run cache counters,
+  first-token timing distributions and request rates.
   [Fixed comparison and counters](https://github.com/vLLM-HUST/vllm-hust-benchmark/blob/d4e688d6d841963e7d9f8ccade2b60abc33ad012/submissions/pr-154-merge-gates-prefix-routing-benefit-2chip-68cf893a4-03a12f9bdd/comparison.json).
 - Standalone CPU, packaging and protocol verification, along with the native restart failure and
   remaining native recovery coverage, are recorded in the
