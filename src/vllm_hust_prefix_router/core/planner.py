@@ -55,6 +55,7 @@ class RoutePlanner:
         *,
         candidate_node_ids: tuple[str, ...] | None = None,
         node_loads: dict[str, int] | None = None,
+        router_queue_requests: dict[str, int] | None = None,
     ) -> PrefixRouteDecision | None:
         """Choose a backend and reserve lifecycle load when enabled."""
         if not prompts:
@@ -106,6 +107,7 @@ class RoutePlanner:
                 prompt_count=len(prompts),
                 block_keys=block_keys,
                 cache_size_blocks=work.cache_size_blocks,
+                router_queue_requests=(router_queue_requests or {}).get(node_id, 0),
                 prompt_loads=tuple(
                     PromptLoad(
                         prompt_tokens=prompt_tokens,

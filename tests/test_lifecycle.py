@@ -40,7 +40,25 @@ def test_cached_worker_wins_when_active_load_is_equal() -> None:
 
     assert selection.selected.load.node_id == "node-a"
     scores = {score.load.node_id: score.cost for score in selection.candidates}
-    assert scores == {"node-a": 4.0, "node-b": 8.0}
+    assert scores == {"node-a": 8.0, "node-b": 12.0}
+
+
+def test_default_request_weight_and_zero_rollback() -> None:
+    for weight, expected in ((None, "node-b"), (0.0, "node-a")):
+        config = (
+            LifecycleRoutingConfig()
+            if weight is None
+            else LifecycleRoutingConfig(active_request_weight=weight)
+        )
+        tracker = LifecycleLoadTracker(block_size=16, config=config)
+        for index in range(2):
+            request_id = f"background-{index}"
+            tracker.select_and_reserve(request_id, [_load("node-a", matched_tokens=64)])
+            tracker.mark_prefill_completed(request_id)
+        selection = tracker.select_and_reserve(
+            "target", [_load("node-a", matched_tokens=64), _load("node-b")]
+        )
+        assert selection.selected.load.node_id == expected
 
 
 def test_active_load_can_outweigh_a_prefix_hit() -> None:
@@ -447,7 +465,9 @@ def test_stream_observer_waits_for_every_choice_before_release() -> None:
 
 
 def test_shared_blocks_keep_the_same_cost_through_acceptance_and_release() -> None:
-    tracker = LifecycleLoadTracker(block_size=16)
+    tracker = LifecycleLoadTracker(
+        block_size=16, config=LifecycleRoutingConfig(active_request_weight=0)
+    )
     worker = ("node-a", 0)
     for index in range(10):
         request_id = f"request-{index}"

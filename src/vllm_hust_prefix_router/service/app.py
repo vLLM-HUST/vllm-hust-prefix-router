@@ -270,8 +270,17 @@ class RouterService:
                 )
             if timing is not None:
                 timing.mark("eligibility_end")
+            queue_requests = None
+            if self.planner.policy == "lifecycle":
+                queue_requests = {
+                    node_id: stats.queued_requests
+                    for node_id, stats in self.pools.stats().items()
+                }
             decision = self.planner.choose(
-                request_id, prompts, candidate_node_ids=candidates
+                request_id,
+                prompts,
+                candidate_node_ids=candidates,
+                router_queue_requests=queue_requests,
             )
         if timing is not None:
             timing.mark("plan_end")

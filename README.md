@@ -36,10 +36,16 @@ Lifecycle accounting never consumes Scheduler snapshots. Removed V1/V2 cost
 models, dynamic Prefill-rate estimation, calibration, and fixed-duration
 reservations are intentionally absent.
 
-The default Lifecycle score charges uncached Prefill blocks and unique active
-prompt blocks. An active-request term is configurable but disabled by default
-(`active_request_weight=0`). These weights are not latency-calibrated; compare
-policies on the target model before making performance claims.
+The default Lifecycle score charges uncached Prefill blocks, unique active
+prompt blocks, and tracked active prompts (`active_request_weight=4`). Set
+it to 0 to restore the previous default score. These weights are not
+latency-calibrated; compare policies on the target model.
+
+Two optional Lifecycle terms charge observed active Decode sequences
+(`active_decode_sequence_weight`) and requests waiting in this Router's
+backend admission queue (`router_queue_weight`). Both default to `0.0`. See
+[Lifecycle load signals](docs/lifecycle-load-signals.md) for the formula,
+observation limits, and configurations for independent comparisons.
 
 ## Public host contract and TP2
 
