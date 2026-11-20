@@ -6,7 +6,8 @@ import json
 import math
 import random
 import time
-from collections import Counter, defaultdict
+import weakref
+from collections import Counter, defaultdict, deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from threading import RLock
@@ -26,8 +27,17 @@ class LifecycleRoutingConfig:
     request_expiry_s: float = 300.0
     active_decode_sequence_weight: float = 0.0
     router_queue_weight: float = 0.0
+    count_weight_unit: str = "blocks"
+    decision_history_size: int = 0
 
     def __post_init__(self) -> None:
+        if self.count_weight_unit not in ("blocks", "tokens"):
+            raise ValueError("count_weight_unit must be 'blocks' or 'tokens'")
+        if (
+            type(self.decision_history_size) is not int
+            or not 0 <= self.decision_history_size <= 4096
+        ):
+            raise ValueError("decision_history_size must be an integer in [0, 4096]")
         for name, value in (
             ("prefill_load_weight", self.prefill_load_weight),
             ("active_request_weight", self.active_request_weight),
@@ -210,6 +220,7 @@ class _TrackedRequest:
     last_touched_s: float
     decoding_sequences: set[tuple[int, int]]
     finished_sequences: set[tuple[int, int]]
+    owner: weakref.ReferenceType | None = None
 
 
 class LifecycleLoadTracker:
@@ -235,6 +246,10 @@ class LifecycleLoadTracker:
         self._worker_requests: dict[WorkerKey, set[str]] = defaultdict(set)
         self._worker_block_refs: dict[WorkerKey, Counter[bytes]] = defaultdict(Counter)
         self._lock = RLock()
+        self._decision_history: deque[dict[str, object]] = deque(
+            maxlen=self.config.decision_history_size
+        )
+        self._selection_sample: float | None = None
 
     def select_and_reserve(
         self,
@@ -259,6 +274,7 @@ class LifecycleLoadTracker:
             scores = tuple(
                 self._score_locked(candidate) for candidate in candidate_map.values()
             )
+            self._selection_sample = None
             selected = self._select_score(scores)
             self._requests[request_id] = _TrackedRequest(
                 request_id=request_id,
@@ -275,7 +291,72 @@ class LifecycleLoadTracker:
                 finished_sequences=set(),
             )
             self._acquire_locked(request_id, selected.load)
+            if self.config.decision_history_size:
+                self._record_decision(request_id, now_s, selected, scores)
             return LifecycleSelection(selected=selected, candidates=scores)
+
+    def decision_history(self) -> tuple[dict[str, object], ...]:
+        """Return independent, bounded diagnostic records without request text."""
+        import copy
+
+        with self._lock:
+            return tuple(copy.deepcopy(record) for record in self._decision_history)
+
+    def effective_count_weights(self) -> dict[str, float]:
+        divisor = self.block_size if self.config.count_weight_unit == "tokens" else 1
+        return {
+            "active_request_weight": self.config.active_request_weight / divisor,
+            "active_decode_sequence_weight": (
+                self.config.active_decode_sequence_weight / divisor
+            ),
+            "router_queue_weight": self.config.router_queue_weight / divisor,
+        }
+
+    def _record_decision(self, request_id, now_s, selected, scores) -> None:
+        candidates = []
+        for score in scores:
+            progress_ages = [
+                max(0.0, now_s - self._requests[key].last_touched_s)
+                for key in self._worker_requests.get(score.load.worker, ())
+                if key != request_id
+            ]
+            candidates.append(
+                {
+                    "node_id": score.load.node_id,
+                    "data_parallel_rank": score.load.data_parallel_rank,
+                    "matched_tokens": score.load.matched_tokens,
+                    "cache_size_blocks": score.load.cache_size_blocks,
+                    "prefill_cost": self.config.prefill_load_weight
+                    * score.potential_prefill_blocks,
+                    "block_cost": self.config.decode_block_weight
+                    * score.potential_decode_blocks,
+                    "request_cost": score.active_request_cost,
+                    "decode_cost": score.active_decode_sequence_cost,
+                    "queue_cost": score.router_queue_cost,
+                    "active_requests": score.active_requests,
+                    "active_decode_sequences": score.active_decode_sequences,
+                    "queued_requests": score.router_queue_requests,
+                    "oldest_progress_age_s": max(progress_ages, default=0.0),
+                    "stale_progress_requests": sum(
+                        age >= self.config.request_expiry_s for age in progress_ages
+                    ),
+                    "cost": score.cost,
+                }
+            )
+        self._decision_history.append(
+            {
+                "request_id": request_id,
+                "time_monotonic_s": now_s,
+                "node_id": selected.load.node_id,
+                "data_parallel_rank": selected.load.data_parallel_rank,
+                "random_sample": self._selection_sample,
+                "selection_temperature": self.config.selection_temperature,
+                "hash_block_size": self.block_size,
+                "count_weight_unit": self.config.count_weight_unit,
+                "effective_count_weights": self.effective_count_weights(),
+                "candidates": candidates,
+            }
+        )
 
     def mark_dispatched(self, request_id: str, worker: WorkerKey) -> bool:
         """Record the worker that accepted the current dispatch attempt."""
@@ -460,6 +541,19 @@ class LifecycleLoadTracker:
             request.last_touched_s = self._clock()
             return True
 
+    def retain_for_handler(self, request_id: str, owner: object) -> bool:
+        """Keep a reservation while its HTTP observer is owned by a live handler.
+
+        Weak ownership permits lease cleanup if a handler abandons the observer.
+        Normal/error/cancellation exits still release explicitly in finally.
+        """
+        with self._lock:
+            request = self._requests.get(request_id)
+            if request is None:
+                return False
+            request.owner = weakref.ref(owner)
+            return True
+
     def free(self, request_id: str) -> bool:
         """Release all request-owned load; repeated releases are harmless."""
         with self._lock:
@@ -479,6 +573,11 @@ class LifecycleLoadTracker:
         with self._lock:
             now_s = self._clock()
             self._cleanup_expired_locked(now_s)
+            return self._worker_load_locked(worker)
+
+    def worker_load_snapshot(self, worker: WorkerKey) -> WorkerLoadView:
+        """Observe tracked work without mutating leases or reservations."""
+        with self._lock:
             return self._worker_load_locked(worker)
 
     def active_request_ids(self) -> tuple[str, ...]:
@@ -541,7 +640,8 @@ class LifecycleLoadTracker:
             raise ValueError("random_sample must return a number")
         if not math.isfinite(sample) or not 0 <= sample <= 1:
             raise ValueError("random_sample must return a value in [0, 1]")
-        return float(sample)
+        self._selection_sample = float(sample)
+        return self._selection_sample
 
     def _score_locked(
         self,
@@ -556,14 +656,15 @@ class LifecycleLoadTracker:
             load.active_prefill_tokens + candidate.uncached_tokens
         ) / self.block_size
         potential_decode_blocks = load.active_decode_blocks + incoming_decode_blocks
-        active_request_cost = self.config.active_request_weight * (
+        weights = self.effective_count_weights()
+        active_request_cost = weights["active_request_weight"] * (
             load.active_requests + candidate.prompt_count
         )
         active_decode_sequence_cost = (
-            self.config.active_decode_sequence_weight * load.active_decode_sequences
+            weights["active_decode_sequence_weight"] * load.active_decode_sequences
         )
         router_queue_cost = (
-            self.config.router_queue_weight * candidate.router_queue_requests
+            weights["router_queue_weight"] * candidate.router_queue_requests
         )
         cost = (
             self.config.prefill_load_weight * potential_prefill_blocks
@@ -746,6 +847,7 @@ class LifecycleLoadTracker:
             request_id
             for request_id, request in self._requests.items()
             if now_s - request.last_touched_s >= self.config.request_expiry_s
+            and (request.owner is None or request.owner() is None)
         )
         for request_id in expired:
             request = self._requests.pop(request_id)
@@ -777,10 +879,13 @@ class RequestLifecycleObserver:
         request_id: str | None,
         *,
         choices_per_prompt: int = 1,
+        owns_request: bool = False,
     ) -> None:
         self.request_id = request_id
         if request_id is not None:
             self.prompt_count = self.tracker.request_prompt_count(request_id) or 1
+            if owns_request:
+                self.tracker.retain_for_handler(request_id, self)
         self.choices_per_prompt = max(1, choices_per_prompt)
 
     def dispatch(self, worker: WorkerKey) -> bool:
@@ -914,6 +1019,15 @@ class RequestLifecycleObserver:
             for container in (delta, message)
             for key in ("content", "reasoning_content", "reasoning")
         )
+        for container in (delta, message):
+            calls = container.get("tool_calls")
+            if isinstance(calls, list):
+                for call in calls:
+                    function = call.get("function") if isinstance(call, dict) else None
+                    if isinstance(function, dict):
+                        values.extend(
+                            function.get(key) for key in ("name", "arguments")
+                        )
         return any(isinstance(value, str) and value for value in values)
 
     def _mark_prefill_completed(self, prompt_index: int) -> None:

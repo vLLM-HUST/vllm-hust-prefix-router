@@ -168,6 +168,7 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
         ),
         tokenizer_revision=fingerprint_values.get("tokenizer_revision"),
         trust_remote_code=fingerprint_values.get("trust_remote_code", False),
+        allow_cache_salt=fingerprint_values.get("allow_cache_salt", True),
     )
     fingerprinter = VllmHustTextFingerprinter(fingerprint_config)
     planner = RoutePlanner(

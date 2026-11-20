@@ -392,9 +392,6 @@ class RouterService:
                     # Observe what the backend sent before a cancellable write.
                     # This does not claim the client received or committed it.
                     usage.feed(chunk)
-                    await response.write(chunk)
-                    if timing is not None and chunk:
-                        timing.mark("first_downstream_body")
                     if observer is not None:
                         observer.observe(
                             {
@@ -403,6 +400,9 @@ class RouterService:
                                 "more_body": True,
                             }
                         )
+                    await response.write(chunk)
+                    if timing is not None and chunk:
+                        timing.mark("first_downstream_body")
                 await response.write_eof()
                 usage.finish()
                 terminal = "completed"
@@ -516,9 +516,16 @@ class RouterService:
         routing: dict[str, object] = {"policy": self.planner.policy}
         tracker = self.planner.lifecycle_tracker
         if tracker is not None:
+            if (
+                tracker.config.count_weight_unit == "tokens"
+                or tracker.config.decision_history_size
+            ):
+                routing["effective_count_weights"] = tracker.effective_count_weights()
+            if tracker.config.decision_history_size:
+                routing["decisions"] = tracker.decision_history()
             routing["lifecycle"] = {
                 node_id: asdict(
-                    tracker.worker_load((node_id, backend.data_parallel_rank))
+                    tracker.worker_load_snapshot((node_id, backend.data_parallel_rank))
                 )
                 for node_id, backend in self._backends.items()
             }
@@ -561,7 +568,7 @@ class RouterService:
         if not isinstance(choices, int) or isinstance(choices, bool) or choices <= 0:
             choices = 1
         observer = RequestLifecycleObserver(tracker)
-        observer.bind(request_id, choices_per_prompt=choices)
+        observer.bind(request_id, choices_per_prompt=choices, owns_request=True)
         return observer
 
     @staticmethod

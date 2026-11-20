@@ -104,3 +104,55 @@ async def test_chat_rejects_invalid_or_unexpected_token_shapes(rendered):
         await fingerprinter.fingerprint(
             "/v1/chat/completions", {"messages": [{"role": "user", "content": "hello"}]}
         )
+
+
+@pytest.mark.asyncio
+async def test_salt_is_passed_to_host_hasher_without_changing_tokens():
+    calls = []
+
+    def salted(tokens, salt):
+        calls.append((tuple(tokens), salt))
+        return (salt.encode(),)
+
+    fp = VllmHustTextFingerprinter(
+        VllmHustFingerprintConfig("fake", 2),
+        _tokenizer=FakeTokenizer(),
+        _hash_tokens=lambda _tokens: (b"plain",),
+        _hash_salted_tokens=salted,
+    )
+    for salt in ("A", "B"):
+        result = await fp.fingerprint(
+            "/v1/completions",
+            {
+                "prompt": [[1, 2, 3], [4, 5]],
+                "cache_salt": salt,
+            },
+        )
+        assert [r.num_tokens for r in result] == [3, 2]
+        assert all(r.block_hashes == (salt.encode(),) for r in result)
+    assert calls == [((1, 2, 3), "A"), ((4, 5), "A"), ((1, 2, 3), "B"), ((4, 5), "B")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("salt", ["", 1, True, [], "x" * 1025])
+async def test_invalid_salt_falls_back(salt):
+    with pytest.raises(UnsupportedFingerprintRequest, match="cache_salt"):
+        await _fingerprinter().fingerprint(
+            "/v1/completions",
+            {
+                "prompt": [1, 2],
+                "cache_salt": salt,
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_unknown_runtime_hash_controls_fall_back():
+    with pytest.raises(UnsupportedFingerprintRequest, match="vllm_xargs"):
+        await _fingerprinter().fingerprint(
+            "/v1/completions",
+            {
+                "prompt": [1, 2],
+                "vllm_xargs": {"runtime": "unknown"},
+            },
+        )
