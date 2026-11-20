@@ -6,6 +6,7 @@ import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
+from types import SimpleNamespace
 from typing import Any
 
 from packaging.specifiers import SpecifierSet
@@ -35,6 +36,7 @@ class VllmHustFingerprintConfig:
     host_version_range: str = ">=0.25.1,<0.30"
     tokenizer_revision: str | None = None
     trust_remote_code: bool = False
+    allow_cache_salt: bool = True
 
     def __post_init__(self) -> None:
         if not self.tokenizer:
@@ -42,6 +44,8 @@ class VllmHustFingerprintConfig:
         if self.hash_block_size <= 0:
             raise ValueError("hash_block_size must be positive")
         SpecifierSet(self.host_version_range)
+        if not isinstance(self.allow_cache_salt, bool):
+            raise ValueError("allow_cache_salt must be a boolean")
 
 
 class VllmHustTextFingerprinter:
@@ -53,8 +57,11 @@ class VllmHustTextFingerprinter:
         *,
         _tokenizer: Any | None = None,
         _hash_tokens: Callable[[Sequence[int]], tuple[bytes, ...]] | None = None,
+        _hash_salted_tokens: Callable[[Sequence[int], str], tuple[bytes, ...]]
+        | None = None,
     ) -> None:
         self.config = config
+        self._hash_salted_tokens = _hash_salted_tokens
         if _tokenizer is not None and _hash_tokens is not None:
             self._tokenizer = _tokenizer
             self._hash_tokens = _hash_tokens
@@ -79,7 +86,7 @@ class VllmHustTextFingerprinter:
         from vllm.tokenizers.registry import get_tokenizer
         from vllm.utils.hashing import get_hash_fn_by_name
         from vllm.v1.core.kv_cache_utils import (
-            hash_block_tokens,
+            get_request_block_hasher,
             init_none_hash,
             maybe_convert_block_hash,
         )
@@ -91,26 +98,30 @@ class VllmHustTextFingerprinter:
         )
         hash_function = get_hash_fn_by_name(config.hash_algorithm)
         init_none_hash(hash_function)
+        request_hasher = get_request_block_hasher(config.hash_block_size, hash_function)
 
-        def hash_tokens(token_ids: Sequence[int]) -> tuple[bytes, ...]:
-            parent_hash = None
-            hashes: list[bytes] = []
-            for start in range(0, len(token_ids), config.hash_block_size):
-                block = token_ids[start : start + config.hash_block_size]
-                if len(block) < config.hash_block_size:
-                    break
-                parent_hash = hash_block_tokens(
-                    hash_function,
-                    parent_hash,
-                    block,
-                    extra_keys=None,
-                )
-                hashes.append(
-                    normalize_external_block_hash(maybe_convert_block_hash(parent_hash))
-                )
-            return tuple(hashes)
+        def hash_tokens(
+            token_ids: Sequence[int], cache_salt: str | None = None
+        ) -> tuple[bytes, ...]:
+            # Text-only request view. The installed host owns salt encoding,
+            # parent chaining and full-block boundaries.
+            request = SimpleNamespace(
+                all_token_ids=tuple(token_ids),
+                num_tokens=len(token_ids),
+                block_hashes=[],
+                cache_salt=cache_salt,
+                lora_request=None,
+                mm_features=[],
+                prompt_embeds=None,
+                kv_materialization_runtime_control=None,
+            )
+            return tuple(
+                normalize_external_block_hash(maybe_convert_block_hash(value))
+                for value in request_hasher(request)
+            )
 
         self._hash_tokens = hash_tokens
+        self._hash_salted_tokens = hash_tokens
 
     async def fingerprint(
         self, path: str, payload: dict[str, object]
@@ -123,17 +134,30 @@ class VllmHustTextFingerprinter:
             token_batches = (self._chat_tokens(payload),)
         else:
             raise UnsupportedFingerprintRequest(f"unsupported request path {path!r}")
+        salt = payload.get("cache_salt")
+        if salt is not None and self._hash_salted_tokens is None:
+            raise UnsupportedFingerprintRequest("salted host hashing is unavailable")
         return tuple(
-            PromptFingerprint(len(token_ids), self._hash_tokens(token_ids))
+            PromptFingerprint(
+                len(token_ids),
+                self._hash_salted_tokens(token_ids, salt)
+                if salt is not None
+                else self._hash_tokens(token_ids),
+            )
             for token_ids in token_batches
         )
 
-    @staticmethod
-    def _reject_unsupported(payload: dict[str, object]) -> None:
+    def _reject_unsupported(self, payload: dict[str, object]) -> None:
+        salt = payload.get("cache_salt")
+        if salt is not None and (
+            not self.config.allow_cache_salt
+            or not isinstance(salt, str)
+            or not 1 <= len(salt) <= 1024
+        ):
+            raise UnsupportedFingerprintRequest("unsupported cache_salt")
         unsupported = (
             "prompt_embeds",
             "multi_modal_data",
-            "cache_salt",
             "lora_request",
             "documents",
             "tools",
@@ -141,6 +165,8 @@ class VllmHustTextFingerprinter:
             "chat_template_kwargs",
             "mm_processor_kwargs",
             "tool_choice",
+            "vllm_xargs",
+            "kv_transfer_params",
         )
         present = [name for name in unsupported if payload.get(name) not in (None, [])]
         if present:

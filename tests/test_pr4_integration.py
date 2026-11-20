@@ -71,6 +71,26 @@ def test_default_public_and_explicit_legacy_profiles(config_probe, legacy):
     assert state.group_block_sizes == {0: 16, 1: 32}
 
 
+def test_lifecycle_token_units_and_salt_config_use_normal_loader(config_probe):
+    raw, _, captured, load = config_probe
+    raw["policy"] = "lifecycle"
+    raw["fingerprint"]["allow_cache_salt"] = False
+    raw["lifecycle"] = {
+        "count_weight_unit": "tokens",
+        "active_request_weight": 4608,
+        "decision_history_size": 16,
+    }
+    service = load()
+    assert captured[0].allow_cache_salt is False
+    tracker = service.planner.lifecycle_tracker
+    assert tracker.config.decision_history_size == 16
+    assert tracker.effective_count_weights()["active_request_weight"] == 4608 / 16
+    assert (
+        service.metrics()["routing"]["effective_count_weights"]["active_request_weight"]
+        == 288
+    )
+
+
 def test_unversioned_requires_opt_in_and_reports_weaker_basis(config_probe):
     raw, codec, _, load = config_probe
     codec.snapshot_replay = False
